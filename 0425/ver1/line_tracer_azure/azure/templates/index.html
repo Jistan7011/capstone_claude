@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Line Tracer Dashboard (Azure 원격)</title>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background:#111; color:#eee; font-family: Arial, sans-serif; }
+    .wrap { max-width: 1280px; margin: 24px auto; padding: 0 16px; }
+    .grid { display:grid; grid-template-columns: 2fr 1fr; gap:16px; }
+    .stack { display:grid; gap:16px; }
+    .card { background:#1a1a1a; border:1px solid #2d2d2d; border-radius:12px; padding:16px; }
+    .video-box { background:#000; border-radius:8px; overflow:hidden; border:1px solid #333; min-height:200px; display:flex; align-items:center; justify-content:center; }
+    .video-box img { width:100%; display:block; }
+    .video-placeholder { color:#555; font-size:14px; }
+    .title { margin:0 0 4px; }
+    .sub { color:#aaa; font-size:14px; margin-bottom:8px; }
+    .status-row { display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid #2a2a2a; font-size:14px; }
+    .status-row:last-child { border-bottom:none; }
+    .key { color:#aaa; }
+    .value { font-weight:600; text-align:right; }
+    .ok { color:#4cd964; }
+    .bad { color:#ff5e57; }
+    .btns { display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; margin-top:12px; }
+    .btn-group-label { color:#aaa; font-size:12px; margin:14px 0 6px; }
+    button { border:none; border-radius:8px; padding:12px; cursor:pointer; font-size:14px; background:#333; color:#fff; transition: background .15s ease; }
+    button.active { background:#2b6cff; }
+    button:disabled { opacity:0.3; cursor:not-allowed; }
+    pre { margin:0; white-space:pre-wrap; word-break:break-word; font-size:12px; color:#cfe7ff; }
+    .pill { display:inline-block; padding:6px 10px; border-radius:999px; background:#2a2a2a; margin-right:8px; font-size:13px; }
+    .summary { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+    .location-box { display:flex; align-items:center; justify-content:center; min-height:120px; border:1px solid #333; border-radius:10px; background:#0d0d0d; }
+    .location-name { font-size:32px; font-weight:700; color:#7db7ff; }
+    .muted { color:#aaa; font-size:13px; }
+    #connBanner { padding:10px 16px; border-radius:8px; font-size:13px; font-weight:600; margin-bottom:12px; text-align:center; display:none; }
+    #connBanner.ok   { display:block; background:#0a2d14; color:#4cd964; border:1px solid #4cd964; }
+    #connBanner.warn { display:block; background:#2d1a00; color:#ffaa00; border:1px solid #ffaa00; }
+    #connBanner.err  { display:block; background:#2d0a0a; color:#ff5e57; border:1px solid #ff5e57; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 class="title">Line Tracer Dashboard <span style="color:#aaa;font-size:16px;font-weight:normal;">(Azure 원격)</span></h1>
+    <div id="connBanner">Azure 서버에 연결 중...</div>
+    <div class="sub">원격 제어 모드 — Jetson이 Azure에 연결되어 있을 때만 제어 가능합니다.</div>
+
+    <div class="grid">
+      <div class="card">
+        <h2 style="margin-top:0;">Live View</h2>
+        <div class="video-box" id="videoBox">
+          <span class="video-placeholder" id="videoPlaceholder">Jetson 연결 대기 중...</span>
+          <img id="stream" src="" alt="stream" style="display:none;" />
+        </div>
+        <div class="btn-group-label">Mode</div>
+        <div class="btns">
+          <button id="btnModeA" onclick="postCmd('A')">AUTO</button>
+          <button id="btnModeM" onclick="postCmd('M')">MANUAL</button>
+          <div></div>
+        </div>
+        <div class="btn-group-label">Direction</div>
+        <div class="btns">
+          <button id="btnDirL" onclick="postCmd('L')">◀ LEFT</button>
+          <button id="btnDirF" onclick="postCmd('F')">▲ FORWARD</button>
+          <button id="btnDirR" onclick="postCmd('R')">RIGHT ▶</button>
+          <button id="btnDirS" onclick="postCmd('S')" style="grid-column:2;">■ STOP</button>
+        </div>
+        <div class="btn-group-label" id="speedBtnsLabel">Speed (수동 모드) — 현재: <span id="speedVal">-</span></div>
+        <div id="speedBtns">
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:8px;">
+            <button onclick="postSpeed(3)">저속<br><small>75</small></button>
+            <button onclick="postSpeed(5)">중속<br><small>125</small></button>
+            <button onclick="postSpeed(7)">고속<br><small>175</small></button>
+            <button onclick="postSpeed(0)">최대<br><small>255</small></button>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
+            <button onclick="postSpeedDelta('down')">− 10</button>
+            <button onclick="postSpeedDelta('up')">+ 10</button>
+          </div>
+        </div>
+        <div class="muted" style="margin-top:10px;">수동 모드에서만 방향·속도 버튼이 동작합니다.</div>
+      </div>
+
+      <div class="stack">
+        <div class="card">
+          <h2 style="margin-top:0;">ATmega Live Status</h2>
+          <div class="summary">
+            <span class="pill">Direction: <strong id="dirPill">-</strong></span>
+            <span class="pill">Mode: <strong id="modePill">-</strong></span>
+            <span class="pill">Line Tracer: <strong id="lineTracerPill">-</strong></span>
+          </div>
+          <div id="status"><div class="muted">텔레메트리 대기 중...</div></div>
+        </div>
+
+        <div class="card">
+          <h2 style="margin-top:0;">Location</h2>
+          <div class="location-box">
+            <div class="location-name" id="locationName">-</div>
+          </div>
+          <div class="muted" style="margin-top:10px;">RFID로 인식된 현재 위치 구역</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── DOM 참조 ────────────────────────────────────────────────────────────
+    const connBanner    = document.getElementById('connBanner');
+    const statusEl      = document.getElementById('status');
+    const dirPill       = document.getElementById('dirPill');
+    const modePill      = document.getElementById('modePill');
+    const lineTracerPill = document.getElementById('lineTracerPill');
+    const locationName  = document.getElementById('locationName');
+    const speedVal      = document.getElementById('speedVal');
+    const streamImg     = document.getElementById('stream');
+    const placeholder   = document.getElementById('videoPlaceholder');
+    const modeButtons   = { A: document.getElementById('btnModeA'), M: document.getElementById('btnModeM') };
+    const dirButtons    = { L: document.getElementById('btnDirL'), F: document.getElementById('btnDirF'), R: document.getElementById('btnDirR'), S: document.getElementById('btnDirS') };
+
+    // ── 상태 ─────────────────────────────────────────────────────────────────
+    let jetsonConnected = false;
+
+    // ── Socket.IO 연결 ────────────────────────────────────────────────────────
+    const socket = io();
+
+    socket.on('connect', () => {
+      connBanner.className = 'warn';
+      connBanner.textContent = 'Azure 서버에 연결됨. Jetson 연결 대기 중...';
+    });
+
+    socket.on('disconnect', () => {
+      connBanner.className = 'err';
+      connBanner.textContent = '⚠ Azure 서버 연결 끊김 — 페이지를 새로고침해 주세요.';
+      setJetsonConnected(false);
+    });
+
+    socket.on('jetson_status', (data) => {
+      setJetsonConnected(data.connected);
+    });
+
+    socket.on('telemetry_update', (t) => {
+      updateTelemetry(t);
+    });
+
+    socket.on('frame_update', (data) => {
+      streamImg.src = 'data:image/jpeg;base64,' + data.data;
+      streamImg.style.display = 'block';
+      placeholder.style.display = 'none';
+    });
+
+    // ── UI 업데이트 ───────────────────────────────────────────────────────────
+    function setJetsonConnected(connected) {
+      jetsonConnected = connected;
+      if (connected) {
+        connBanner.className = 'ok';
+        connBanner.textContent = '✓ Jetson 연결됨 — 원격 제어 활성';
+      } else {
+        connBanner.className = 'err';
+        connBanner.textContent = '⚠ Jetson 연결 끊김 — 제어 불가';
+        streamImg.style.display = 'none';
+        placeholder.style.display = '';
+        placeholder.textContent = 'Jetson 연결 대기 중...';
+      }
+      // 모든 제어 버튼 활성/비활성
+      document.querySelectorAll('button').forEach(b => {
+        b.disabled = !connected;
+      });
+    }
+
+    function row(k, v) {
+      return `<div class="status-row"><span class="key">${k}</span><span class="value">${v}</span></div>`;
+    }
+    function fmtBool(v) {
+      return v ? '<span class="ok">OK</span>' : '<span class="bad">FAIL</span>';
+    }
+    function setActiveButton(group, activeKey) {
+      Object.entries(group).forEach(([key, el]) => {
+        if (!el) return;
+        if (key === activeKey) el.classList.add('active');
+        else el.classList.remove('active');
+      });
+    }
+    function directionToKey(d) {
+      return { LEFT:'L', FORWARD:'F', RIGHT:'R', STOP:'S' }[String(d||'').toUpperCase()] || null;
+    }
+    function modeToKey(m) {
+      return { AUTO:'A', MANUAL:'M' }[String(m||'').toUpperCase()] || null;
+    }
+
+    function updateTelemetry(t) {
+      dirPill.textContent       = t.direction || '-';
+      modePill.textContent      = t.mode      || '-';
+      locationName.textContent  = t.zone      || '-';
+      speedVal.textContent      = t.manual_speed != null ? t.manual_speed : '-';
+
+      const lineActive = (t.mode || '').toUpperCase() === 'AUTO';
+      lineTracerPill.textContent = lineActive ? 'ACTIVE' : 'PAUSED';
+
+      const isManual = (t.mode || '').toUpperCase() === 'MANUAL';
+      document.getElementById('speedBtns').style.opacity      = isManual ? '1' : '0.3';
+      document.getElementById('speedBtns').style.pointerEvents= isManual ? 'auto' : 'none';
+      document.getElementById('speedBtnsLabel').style.opacity = isManual ? '1' : '0.5';
+
+      setActiveButton(modeButtons, modeToKey(t.mode));
+      setActiveButton(dirButtons,  directionToKey(t.direction));
+
+      statusEl.innerHTML = ''
+        + row('mode',            t.mode       ?? '-')
+        + row('direction',       t.direction  ?? '-')
+        + row('line_tracer',     lineActive ? '<span class="ok">ACTIVE</span>' : '<span class="bad">PAUSED</span>')
+        + row('rpm_left',        t.rpm_left   ?? '-')
+        + row('rpm_right',       t.rpm_right  ?? '-')
+        + row('manual_speed',    t.manual_speed ?? '-')
+        + row('location',        t.zone       ?? '-');
+    }
+
+    // ── 명령 전송 ─────────────────────────────────────────────────────────────
+    function postCmd(cmd) {
+      if (!jetsonConnected) return;
+      socket.emit('command', { cmd });
+      if (cmd === 'A' || cmd === 'M') setActiveButton(modeButtons, cmd);
+      if (['L','F','R','S'].includes(cmd)) setActiveButton(dirButtons, cmd);
+    }
+    function postSpeed(level) {
+      if (!jetsonConnected) return;
+      socket.emit('speed', { level });
+    }
+    function postSpeedDelta(dir) {
+      if (!jetsonConnected) return;
+      socket.emit('speed', { dir });
+    }
+  </script>
+</body>
+</html>
