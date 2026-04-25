@@ -85,18 +85,26 @@ def on_jetson_hello():
 @socketio.on('telemetry')
 def on_telemetry(data: dict):
     """Jetson에서 텔레메트리 수신 → 모든 브라우저로 브로드캐스트."""
-    global latest_telemetry
+    global latest_telemetry, jetson_sid
     with _lock:
         latest_telemetry = dict(data)
+        # jetson_hello가 유실된 경우 telemetry 송신자를 Jetson으로 자동 등록
+        if jetson_sid != request.sid:
+            jetson_sid = request.sid
+            socketio.emit('jetson_status', {'connected': True})
     socketio.emit('telemetry_update', data)
 
 
 @socketio.on('frame')
 def on_frame(data: dict):
     """Jetson에서 JPEG 프레임 수신 → 모든 브라우저로 브로드캐스트."""
-    global latest_frame_b64
+    global latest_frame_b64, jetson_sid
     with _lock:
         latest_frame_b64 = data.get('data')
+        # jetson_hello가 유실된 경우 frame 송신자를 Jetson으로 자동 등록
+        if jetson_sid != request.sid:
+            jetson_sid = request.sid
+            socketio.emit('jetson_status', {'connected': True})
     socketio.emit('frame_update', data)
 
 

@@ -28,10 +28,11 @@ import requests
 import socketio
 
 # ── 환경 변수 ─────────────────────────────────────────────────────────────────
-AZURE_URL          = os.getenv('AZURE_URL', '').rstrip('/')
+AZURE_URL          = os.getenv('AZURE_URL', 'http://20.196.194.107').rstrip('/')
 LOCAL_URL          = os.getenv('LOCAL_URL', 'http://127.0.0.1:8080').rstrip('/')
 TELEMETRY_INTERVAL = float(os.getenv('TELEMETRY_INTERVAL', '1.0'))
-FRAME_INTERVAL     = float(os.getenv('FRAME_INTERVAL', '0.5'))
+FRAME_INTERVAL     = float(os.getenv('FRAME_INTERVAL', '0.15'))   # ~6fps
+HEARTBEAT_INTERVAL = float(os.getenv('HEARTBEAT_INTERVAL', '10.0'))  # jetson_hello 재전송 주기
 
 if not AZURE_URL:
     print('[Bridge] 오류: AZURE_URL 환경 변수를 설정해 주세요.')
@@ -89,8 +90,9 @@ def on_speed(data: dict):
 
 def push_loop():
     """텔레메트리와 영상 프레임을 주기적으로 Azure에 전송."""
-    last_tele  = 0.0
-    last_frame = 0.0
+    last_tele      = 0.0
+    last_frame     = 0.0
+    last_heartbeat = 0.0
 
     while True:
         if not sio.connected:
@@ -98,6 +100,11 @@ def push_loop():
             continue
 
         now = time.time()
+
+        # 주기적 jetson_hello 재전송 — reconnect 시 jetson_sid 누락 방지
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+            sio.emit('jetson_hello', {})
+            last_heartbeat = now
 
         # 텔레메트리 전송 (TELEMETRY_INTERVAL 마다)
         if now - last_tele >= TELEMETRY_INTERVAL:
