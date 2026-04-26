@@ -16,6 +16,8 @@ except Exception:
 app = Flask(__name__)
 
 CAM_INDEX = int(os.getenv('CAM_INDEX', '0'))
+CAM_BACKEND = os.getenv('CAM_BACKEND', 'auto')   # 'auto' | 'v4l2' | 'gstreamer'
+GST_PIPELINE = os.getenv('GST_PIPELINE', '')      # 커스텀 GStreamer 파이프라인 (비어있으면 자동 생성)
 CAP_W = int(os.getenv('CAP_W', '640'))
 CAP_H = int(os.getenv('CAP_H', '480'))
 CAP_FPS = int(os.getenv('CAP_FPS', '20'))
@@ -261,6 +263,41 @@ class MCUBridge:
 mcu = MCUBridge()
 
 
+def _open_camera() -> cv2.VideoCapture:
+    """CAM_BACKEND / GST_PIPELINE 환경 변수에 따라 VideoCapture를 생성한다.
+
+    Jetson Orin Nano에서 V4L2 기본 모드는 select() timeout이 발생할 수 있으므로
+    CAM_BACKEND=gstreamer 또는 GST_PIPELINE을 설정하면 GStreamer 파이프라인을 사용한다.
+    """
+    if GST_PIPELINE:
+        return cv2.VideoCapture(GST_PIPELINE, cv2.CAP_GSTREAMER)
+
+    if CAM_BACKEND == 'gstreamer':
+        pipeline = (
+            f"v4l2src device=/dev/video{CAM_INDEX} ! "
+            f"video/x-raw,width={CAP_W},height={CAP_H},framerate={CAP_FPS}/1 ! "
+            f"videoconvert ! video/x-raw,format=BGR ! "
+            f"appsink max-buffers=1 drop=true sync=false"
+        )
+        return cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+
+    if CAM_BACKEND == 'v4l2':
+        cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_V4L2)
+    else:
+        cap = cv2.VideoCapture(CAM_INDEX)
+
+    # GStreamer 파이프라인이 아닌 경우에만 set() 호출
+    if cap.isOpened():
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAP_W)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAP_H)
+        cap.set(cv2.CAP_PROP_FPS, CAP_FPS)
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+    return cap
+
+
 def find_contours_compat(bin_img):
     out = cv2.findContours(bin_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if len(out) == 3:
@@ -432,22 +469,22 @@ def build_manual_frame(frame):
 def camera_worker():
     global latest_jpg, latest_result
     diag.worker_started = True
-    cap = cv2.VideoCapture(CAM_INDEX)
-    if not cap.isOpened():
-        diag.last_error = 'camera open failed'
-        return
+
+    cap = _open_camera()
+    while not cap.isOpened():
+        diag.camera_opened = False
+        diag.last_error = 'camera open failed, retrying in 3s...'
+        cap.release()
+        time.sleep(3.0)
+        cap = _open_camera()
     diag.camera_opened = True
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAP_W)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAP_H)
-    cap.set(cv2.CAP_PROP_FPS, CAP_FPS)
-    try:
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    except Exception:
-        pass
+    diag.last_error = ''
 
     lost_count = 0
     last_cap = 0.0
     cap_interval = 1.0 / max(1, CAP_FPS)
+    fail_streak = 0
+    FAIL_REOPEN = 5  # 연속 실패 5회 → 카메라 재오픈
 
     while True:
         now = time.time()
@@ -459,30 +496,50 @@ def camera_worker():
         ret, frame = cap.read()
         if not ret or frame is None:
             diag.frames_fail += 1
+            fail_streak += 1
+            diag.camera_opened = False
+            if fail_streak >= FAIL_REOPEN:
+                diag.last_error = f'camera stall (fail={fail_streak}), reopening...'
+                cap.release()
+                time.sleep(1.0)
+                cap = _open_camera()
+                diag.camera_opened = cap.isOpened()
+                if not cap.isOpened():
+                    diag.last_error = 'camera reopen failed'
+                    time.sleep(2.0)
+                else:
+                    diag.last_error = ''
+                fail_streak = 0
             time.sleep(0.01)
             continue
 
+        diag.camera_opened = True
+        fail_streak = 0
         diag.frames_ok += 1
         diag.last_frame_ts = time.time()
         t0 = time.time()
 
-        tele_mode = get_current_mode()
-        if tele_mode == 'MANUAL':
-            lost_count = 0
-            annotated, result = build_manual_frame(frame)
-        else:
-            annotated, result = process_line(frame)
-            if result['detected']:
+        try:
+            tele_mode = get_current_mode()
+            if tele_mode == 'MANUAL':
                 lost_count = 0
+                annotated, result = build_manual_frame(frame)
             else:
-                lost_count += 1
-            decision = decide_command(result, lost_count)
-            result['decision'] = decision
-            result['vision_state'] = 'ACTIVE'
-            sent = mcu.send_command(decision)
-            append_history(decision, sent, result['err'], 'vision', tele_mode)
-            if DRAW_DEBUG_TEXT:
-                annotated = draw_status(annotated, result, cmd_to_label(decision), tele_mode)
+                annotated, result = process_line(frame)
+                if result['detected']:
+                    lost_count = 0
+                else:
+                    lost_count += 1
+                decision = decide_command(result, lost_count)
+                result['decision'] = decision
+                result['vision_state'] = 'ACTIVE'
+                sent = mcu.send_command(decision)
+                append_history(decision, sent, result['err'], 'vision', tele_mode)
+                if DRAW_DEBUG_TEXT:
+                    annotated = draw_status(annotated, result, cmd_to_label(decision), tele_mode)
+        except Exception as e:
+            diag.last_error = f'frame process error: {e}'
+            continue
 
         t1 = time.time()
         jpg = encode_stream_frame(annotated)

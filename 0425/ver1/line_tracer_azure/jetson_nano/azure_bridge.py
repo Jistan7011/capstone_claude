@@ -28,10 +28,10 @@ import requests
 import socketio
 
 # ── 환경 변수 ─────────────────────────────────────────────────────────────────
-AZURE_URL          = os.getenv('AZURE_URL', 'http://20.196.194.107').rstrip('/')
+AZURE_URL          = os.getenv('AZURE_URL', 'http://20.196.194.107:8000').rstrip('/')
 LOCAL_URL          = os.getenv('LOCAL_URL', 'http://127.0.0.1:8080').rstrip('/')
 TELEMETRY_INTERVAL = float(os.getenv('TELEMETRY_INTERVAL', '1.0'))
-FRAME_INTERVAL     = float(os.getenv('FRAME_INTERVAL', '0.15'))   # ~6fps
+FRAME_INTERVAL     = float(os.getenv('FRAME_INTERVAL', '0.25'))   # ~4fps
 HEARTBEAT_INTERVAL = float(os.getenv('HEARTBEAT_INTERVAL', '10.0'))  # jetson_hello 재전송 주기
 
 if not AZURE_URL:
@@ -63,7 +63,7 @@ def disconnect():
 def on_command(data: dict):
     """Azure 브라우저 → 로컬 /send/<cmd>"""
     cmd = str(data.get('cmd', '')).upper()
-    if not cmd:
+    if cmd not in {'F', 'L', 'R', 'S', 'A', 'M'}:
         return
     try:
         r = requests.post(f'{LOCAL_URL}/send/{cmd}', timeout=2)
@@ -77,12 +77,15 @@ def on_speed(data: dict):
     """Azure 브라우저 → 로컬 /speed/<level|dir>"""
     try:
         if 'level' in data:
-            requests.post(f'{LOCAL_URL}/speed/{int(data["level"])}', timeout=2)
-            print(f'[Bridge] 속도 설정: level={data["level"]}')
+            level = int(data['level'])
+            requests.post(f'{LOCAL_URL}/speed/{level}', timeout=2)
+            print(f'[Bridge] 속도 설정: level={level}')
         elif 'dir' in data:
-            requests.post(f'{LOCAL_URL}/speed/{data["dir"]}', timeout=2)
-            print(f'[Bridge] 속도 증감: dir={data["dir"]}')
-    except requests.RequestException as e:
+            direction = str(data['dir'])
+            if direction in ('up', 'down'):
+                requests.post(f'{LOCAL_URL}/speed/{direction}', timeout=2)
+                print(f'[Bridge] 속도 증감: dir={direction}')
+    except (requests.RequestException, ValueError) as e:
         print(f'[Bridge] 속도 명령 전달 실패: {e}')
 
 
@@ -124,9 +127,11 @@ def push_loop():
                 if r.status_code == 200 and r.content:
                     b64 = base64.b64encode(r.content).decode('ascii')
                     sio.emit('frame', {'data': b64})
-                    last_frame = now
-            except requests.RequestException:
-                pass
+                # 204: 아직 프레임 없음 — 재시도 간격 유지
+                last_frame = now
+            except requests.RequestException as e:
+                print(f'[Bridge] 프레임 취득 실패: {e}')
+                last_frame = now
 
         time.sleep(0.05)
 

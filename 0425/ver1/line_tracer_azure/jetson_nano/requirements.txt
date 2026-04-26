@@ -2,3 +2,5 @@ flask
 opencv-python
 numpy
 pyserial
+requests
+python-socketio[client]

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sshpass -p 1234 scp ./app.py ./azure_bridge.py capstone@10.156.128.24:/home/capstone/capstone/claude/0425/)",
+      "Bash(git *)"
+    ]
+  }
+}

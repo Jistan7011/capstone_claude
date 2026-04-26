@@ -22,6 +22,9 @@ Socket.IO 이벤트 (브라우저 → 서버):
   jetson_status    : {connected: bool}
 """
 
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import threading
 from flask import Flask, render_template, jsonify, request
@@ -73,7 +76,7 @@ def on_disconnect():
 
 
 @socketio.on('jetson_hello')
-def on_jetson_hello():
+def on_jetson_hello(data=None):
     """Jetson이 연결 직후 자신을 서버에 등록."""
     global jetson_sid
     with _lock:
@@ -86,12 +89,14 @@ def on_jetson_hello():
 def on_telemetry(data: dict):
     """Jetson에서 텔레메트리 수신 → 모든 브라우저로 브로드캐스트."""
     global latest_telemetry, jetson_sid
+    newly_registered = False
     with _lock:
         latest_telemetry = dict(data)
-        # jetson_hello가 유실된 경우 telemetry 송신자를 Jetson으로 자동 등록
         if jetson_sid != request.sid:
             jetson_sid = request.sid
-            socketio.emit('jetson_status', {'connected': True})
+            newly_registered = True
+    if newly_registered:
+        socketio.emit('jetson_status', {'connected': True})
     socketio.emit('telemetry_update', data)
 
 
@@ -99,12 +104,14 @@ def on_telemetry(data: dict):
 def on_frame(data: dict):
     """Jetson에서 JPEG 프레임 수신 → 모든 브라우저로 브로드캐스트."""
     global latest_frame_b64, jetson_sid
+    newly_registered = False
     with _lock:
         latest_frame_b64 = data.get('data')
-        # jetson_hello가 유실된 경우 frame 송신자를 Jetson으로 자동 등록
         if jetson_sid != request.sid:
             jetson_sid = request.sid
-            socketio.emit('jetson_status', {'connected': True})
+            newly_registered = True
+    if newly_registered:
+        socketio.emit('jetson_status', {'connected': True})
     socketio.emit('frame_update', data)
 
 
