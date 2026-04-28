@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Line Tracer + YOLO Dashboard</title>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #101214;
+      color: #f2f5f7;
+      font-family: Arial, "Noto Sans KR", sans-serif;
+    }
+    button {
+      border: 1px solid #38404a;
+      border-radius: 8px;
+      padding: 11px 12px;
+      cursor: pointer;
+      font-size: 14px;
+      background: #232932;
+      color: #fff;
+    }
+    button:hover { background: #2d3541; }
+    button.active { background: #2563eb; border-color: #2563eb; }
+    button:disabled { opacity: .35; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 8px; border-bottom: 1px solid #29313a; text-align: left; }
+    th { color: #9aa7b7; font-weight: 600; }
+    .wrap { max-width: 1480px; margin: 0 auto; padding: 18px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+    .title { margin: 0; font-size: 26px; letter-spacing: 0; }
+    .sub { margin-top: 5px; color: #9aa7b7; font-size: 14px; }
+    .status-pills { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 31px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: #1b2027;
+      border: 1px solid #303844;
+      color: #cbd5e1;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
+    .ok .dot { background: #22c55e; }
+    .bad .dot { background: #ef4444; }
+    .main-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(340px, .8fr);
+      gap: 14px;
+    }
+    .video-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .panel {
+      background: #171b21;
+      border: 1px solid #2a323d;
+      border-radius: 8px;
+      padding: 14px;
+      min-width: 0;
+    }
+    .panel h2 {
+      margin: 0 0 10px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+    .video-box {
+      aspect-ratio: 4 / 3;
+      background: #050607;
+      border: 1px solid #2c3440;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      color: #677282;
+      font-size: 14px;
+    }
+    .video-box img { width: 100%; height: 100%; object-fit: contain; display: none; }
+    .controls { display: grid; gap: 10px; margin-top: 12px; }
+    .control-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .control-row.four { grid-template-columns: repeat(4, 1fr); }
+    .label { color: #9aa7b7; font-size: 12px; margin-bottom: 6px; }
+    .stack { display: grid; gap: 14px; }
+    .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .metric {
+      min-height: 60px;
+      background: #11151a;
+      border: 1px solid #29313a;
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .metric .k { color: #94a3b8; font-size: 12px; }
+    .metric .v { margin-top: 6px; font-size: 18px; font-weight: 700; overflow-wrap: anywhere; }
+    .tables {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 14px;
+      margin-top: 14px;
+    }
+    .table-wrap { max-height: 310px; overflow: auto; border: 1px solid #29313a; border-radius: 8px; }
+    .empty { color: #687586; padding: 14px; font-size: 13px; }
+    .accent { color: #60a5fa; }
+    @media (max-width: 1080px) {
+      .main-grid, .video-grid, .tables { grid-template-columns: 1fr; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .status-pills { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div>
+        <h1 class="title">Line Tracer + YOLO Dashboard</h1>
+        <div class="sub">라인트레이서 주행 제어, 실시간 영상, YOLO 스트림, 감지 로그를 한 화면에서 확인합니다.</div>
+      </div>
+      <div class="status-pills">
+        <span class="pill bad" id="lineConn"><span class="dot"></span>Line Jetson: <strong>OFF</strong></span>
+        <span class="pill bad" id="yoloConn"><span class="dot"></span>YOLO Stream: <strong>OFF</strong></span>
+        <span class="pill" id="lastYolo">YOLO last: <strong>-</strong></span>
+      </div>
+    </div>
+
+    <div class="main-grid">
+      <div class="stack">
+        <div class="video-grid">
+          <section class="panel">
+            <h2>Line Tracer View</h2>
+            <div class="video-box">
+              <span id="linePlaceholder">라인트레이서 Jetson 연결 대기</span>
+              <img id="lineStream" alt="line tracer stream" />
+            </div>
+            <div class="controls">
+              <div>
+                <div class="label">Mode</div>
+                <div class="control-row">
+                  <button id="btnModeA" onclick="postCmd('A')">AUTO</button>
+                  <button id="btnModeM" onclick="postCmd('M')">MANUAL</button>
+                  <button id="btnDirS" onclick="postCmd('S')">STOP</button>
+                </div>
+              </div>
+              <div>
+                <div class="label">Direction</div>
+                <div class="control-row">
+                  <button id="btnDirL" onclick="postCmd('L')">LEFT</button>
+                  <button id="btnDirF" onclick="postCmd('F')">FORWARD</button>
+                  <button id="btnDirR" onclick="postCmd('R')">RIGHT</button>
+                </div>
+              </div>
+              <div>
+                <div class="label">Manual Speed: <span id="speedVal">-</span></div>
+                <div class="control-row four">
+                  <button onclick="postSpeed(3)">75</button>
+                  <button onclick="postSpeed(5)">125</button>
+                  <button onclick="postSpeed(7)">175</button>
+                  <button onclick="postSpeed(0)">255</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2>YOLO View</h2>
+            <div class="video-box">
+              <span id="yoloPlaceholder">YOLO 스트림 연결 대기</span>
+              <img id="yoloStream" alt="yolo stream" />
+            </div>
+            <div class="metric-grid" style="margin-top:12px;">
+              <div class="metric"><div class="k">Device</div><div class="v" id="yoloDevice">-</div></div>
+              <div class="metric"><div class="k">Frame</div><div class="v" id="yoloFrame">-</div></div>
+              <div class="metric"><div class="k">FPS</div><div class="v" id="yoloFps">-</div></div>
+              <div class="metric"><div class="k">Detections</div><div class="v" id="yoloCount">0</div></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="tables">
+          <section class="panel">
+            <h2>Recent YOLO Detections</h2>
+            <div class="table-wrap" id="recentTable"></div>
+          </section>
+          <section class="panel">
+            <h2>15 Minute Summaries</h2>
+            <div class="table-wrap" id="summaryTable"></div>
+          </section>
+        </div>
+      </div>
+
+      <aside class="stack">
+        <section class="panel">
+          <h2>ATmega Status</h2>
+          <div class="metric-grid">
+            <div class="metric"><div class="k">Mode</div><div class="v" id="modePill">-</div></div>
+            <div class="metric"><div class="k">Direction</div><div class="v" id="dirPill">-</div></div>
+            <div class="metric"><div class="k">RPM Left</div><div class="v" id="rpmLeft">-</div></div>
+            <div class="metric"><div class="k">RPM Right</div><div class="v" id="rpmRight">-</div></div>
+            <div class="metric"><div class="k">Location</div><div class="v accent" id="locationName">-</div></div>
+            <div class="metric"><div class="k">Line Tracer</div><div class="v" id="lineTracerPill">-</div></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Last 15 Minutes</h2>
+          <div id="counts15m" class="table-wrap"></div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const socket = io();
+    let lineConnected = false;
+
+    const lineConn = document.getElementById('lineConn');
+    const yoloConn = document.getElementById('yoloConn');
+    const lastYolo = document.getElementById('lastYolo');
+    const lineStream = document.getElementById('lineStream');
+    const yoloStream = document.getElementById('yoloStream');
+    const linePlaceholder = document.getElementById('linePlaceholder');
+    const yoloPlaceholder = document.getElementById('yoloPlaceholder');
+    const modeButtons = { A: byId('btnModeA'), M: byId('btnModeM') };
+    const dirButtons = { L: byId('btnDirL'), F: byId('btnDirF'), R: byId('btnDirR'), S: byId('btnDirS') };
+
+    function byId(id) { return document.getElementById(id); }
+    function value(id, text) { byId(id).textContent = text ?? '-'; }
+    function setConn(el, label, connected) {
+      el.className = connected ? 'pill ok' : 'pill bad';
+      el.innerHTML = `<span class="dot"></span>${label}: <strong>${connected ? 'ON' : 'OFF'}</strong>`;
+    }
+    function setActiveButton(group, activeKey) {
+      Object.entries(group).forEach(([key, el]) => {
+        if (!el) return;
+        el.classList.toggle('active', key === activeKey);
+      });
+    }
+    function directionToKey(d) {
+      return { LEFT:'L', FORWARD:'F', RIGHT:'R', STOP:'S' }[String(d || '').toUpperCase()] || null;
+    }
+    function modeToKey(m) {
+      return { AUTO:'A', MANUAL:'M' }[String(m || '').toUpperCase()] || null;
+    }
+    function fmtNum(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toFixed(2) : '-';
+    }
+
+    socket.on('connect', () => {});
+    socket.on('disconnect', () => {
+      setLineConnected(false);
+      setYoloConnected(false);
+    });
+    socket.on('service_status', (data) => {
+      if (data.line) {
+        setLineConnected(data.line.connected);
+        if (data.line.telemetry) updateTelemetry(data.line.telemetry);
+      }
+      if (data.yolo) {
+        setYoloConnected(data.yolo.connected);
+        updateYoloMeta(data.yolo.latest_meta || {});
+        if (data.yolo.last_update_ts) lastYolo.innerHTML = `YOLO last: <strong>${data.yolo.last_update_ts}</strong>`;
+      }
+    });
+    socket.on('jetson_status', (data) => setLineConnected(Boolean(data.connected)));
+    socket.on('yolo_status', (data) => {
+      setYoloConnected(Boolean(data.connected));
+      updateYoloMeta(data.meta || {});
+    });
+    socket.on('telemetry_update', updateTelemetry);
+    socket.on('frame_update', (data) => setImage(lineStream, linePlaceholder, data.data));
+    socket.on('yolo_frame_update', (data) => {
+      setImage(yoloStream, yoloPlaceholder, data.data);
+      updateYoloMeta(data);
+    });
+    socket.on('yolo_detection_update', (data) => {
+      updateYoloMeta(data.latest_meta || {});
+      value('yoloCount', (data.latest_detections || []).length);
+      if (data.last_update_ts) lastYolo.innerHTML = `YOLO last: <strong>${data.last_update_ts}</strong>`;
+    });
+    socket.on('yolo_stats_update', renderStats);
+
+    function setImage(img, placeholder, b64) {
+      if (!b64) return;
+      img.src = 'data:image/jpeg;base64,' + b64;
+      img.style.display = 'block';
+      placeholder.style.display = 'none';
+    }
+    function setLineConnected(connected) {
+      lineConnected = connected;
+      setConn(lineConn, 'Line Jetson', connected);
+      document.querySelectorAll('button').forEach((b) => b.disabled = !connected);
+      if (!connected) {
+        lineStream.style.display = 'none';
+        linePlaceholder.style.display = '';
+      }
+    }
+    function setYoloConnected(connected) {
+      setConn(yoloConn, 'YOLO Stream', connected);
+      if (!connected) {
+        yoloStream.style.display = 'none';
+        yoloPlaceholder.style.display = '';
+      }
+    }
+    function updateTelemetry(t) {
+      value('modePill', t.mode);
+      value('dirPill', t.direction);
+      value('rpmLeft', t.rpm_left);
+      value('rpmRight', t.rpm_right);
+      value('locationName', t.zone);
+      value('speedVal', t.manual_speed);
+      const lineActive = String(t.mode || '').toUpperCase() === 'AUTO';
+      value('lineTracerPill', lineActive ? 'ACTIVE' : 'PAUSED');
+      setActiveButton(modeButtons, modeToKey(t.mode));
+      setActiveButton(dirButtons, directionToKey(t.direction));
+    }
+    function updateYoloMeta(meta) {
+      value('yoloDevice', meta.device_id);
+      value('yoloFrame', meta.frame_id);
+      value('yoloFps', meta.fps);
+      if (meta.detection_count != null) value('yoloCount', meta.detection_count);
+    }
+    function renderStats(data) {
+      renderRecent(data.recent || []);
+      renderSummary(data.summaries || []);
+      renderCounts(data.counts15m || []);
+    }
+    function renderRecent(rows) {
+      if (!rows.length) {
+        byId('recentTable').innerHTML = '<div class="empty">감지 로그가 아직 없습니다.</div>';
+        return;
+      }
+      byId('recentTable').innerHTML = `
+        <table><thead><tr><th>Time</th><th>Class</th><th>Conf</th><th>Frame</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${r.timestamp || '-'}</td><td>${r.class_name || '-'}</td><td>${fmtNum(r.confidence)}</td><td>${r.frame_id ?? '-'}</td></tr>`).join('')}</tbody></table>`;
+    }
+    function renderSummary(rows) {
+      if (!rows.length) {
+        byId('summaryTable').innerHTML = '<div class="empty">15분 요약 데이터가 아직 없습니다.</div>';
+        return;
+      }
+      byId('summaryTable').innerHTML = `
+        <table><thead><tr><th>Created</th><th>Class</th><th>Count</th><th>Avg</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${r.created_at || '-'}</td><td>${r.class_name || '-'}</td><td>${r.detection_count ?? 0}</td><td>${fmtNum(r.avg_confidence)}</td></tr>`).join('')}</tbody></table>`;
+    }
+    function renderCounts(rows) {
+      if (!rows.length) {
+        byId('counts15m').innerHTML = '<div class="empty">최근 15분 감지 없음</div>';
+        return;
+      }
+      byId('counts15m').innerHTML = `
+        <table><thead><tr><th>Class</th><th>Count</th><th>Avg Conf</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${r.class_name || '-'}</td><td>${r.detection_count ?? 0}</td><td>${fmtNum(r.avg_confidence)}</td></tr>`).join('')}</tbody></table>`;
+    }
+    function postCmd(cmd) {
+      if (!lineConnected) return;
+      socket.emit('command', { cmd });
+    }
+    function postSpeed(level) {
+      if (!lineConnected) return;
+      socket.emit('speed', { level });
+    }
+  </script>
+</body>
+</html>
