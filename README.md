@@ -8,6 +8,7 @@ Claude Code로 캡스톤 날먹을 하고싶어
 터미널 3개 필요
 
 1.Yolo AI
+
 sudo docker run -it --rm \
 --runtime nvidia \
 --network host \
