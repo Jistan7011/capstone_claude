@@ -1,0 +1,13 @@
+flask>=2.3
+flask-socketio>=5.3
+eventlet>=0.35
+gunicorn>=21.2
+langchain
+langchain-community
+langchain-openai
+langchain-classic
+langchain-text-splitters
+openai
+chromadb
+tiktoken
+pypdf

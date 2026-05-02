@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs wc *)",
+      "PowerShell(Get-ChildItem -Path \"D:\\\\Users\\\\qus70\\\\Desktop\\\\캡스톤 종합\" -Recurse -Force | Select-Object FullName | ForEach-Object { $_.FullName -replace [regex]::Escape\\(\"D:\\\\Users\\\\qus70\\\\Desktop\\\\캡스톤 종합\"\\), \".\" } | Sort-Object)"
+    ]
+  }
+}
