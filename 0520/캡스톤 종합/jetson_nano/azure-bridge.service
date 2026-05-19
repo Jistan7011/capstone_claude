@@ -1,0 +1,17 @@
+[Unit]
+Description=Azure Bridge (Jetson Nano)
+After=network.target line-tracer.service
+Requires=line-tracer.service
+
+[Service]
+Type=simple
+User=capstone
+WorkingDirectory=/home/capstone/jetson_nano
+Environment=AZURE_URL=http://20.196.194.107
+Environment=LOCAL_URL=http://127.0.0.1:8080
+ExecStart=/usr/bin/python3 /home/capstone/jetson_nano/azure_bridge.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+streamlit
+
+# LangChain & OpenAI
+langchain
+langchain-community
+langchain-openai
+openai
+tiktoken
+
+# 벡터DB
+chromadb
+
+# 문서 로더 관련
+pypdf
+
+# 기타 (필요시)
+python-dotenv

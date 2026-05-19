@@ -1,0 +1,22 @@
+[Unit]
+Description=Line Tracer App (Jetson Nano)
+After=network.target
+
+[Service]
+Type=simple
+User=capstone
+WorkingDirectory=/home/capstone/jetson_nano
+Environment=CAM_INDEX=2
+Environment=CAM_BACKEND=v4l2
+Environment=CAP_W=320
+Environment=CAP_H=240
+Environment=CAP_FPS=20
+Environment=HTTP_PORT=8080
+Environment=SERIAL_PORT=/dev/atmega128
+Environment=SERIAL_RECONNECT_DELAY=3.0
+ExecStart=/usr/bin/python3 /home/capstone/jetson_nano/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
