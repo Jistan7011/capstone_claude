@@ -2,9 +2,9 @@
  * ATmega128 Line Tracer + PN532 RFID + Bluetooth + Jetson Telemetry
  *
  * Jetson Nano <-> USART0 <-> ATmega128
- *   Jetson TX -> ATmega RX0 : F/L/R/S (AUTO mode only)
+ * Jetson TX -> ATmega RX0 : A/M, T,left_target_rpm,right_target_rpm
  *   ATmega TX0 -> Jetson RX : telemetry line
- *     STAT,mode=AUTO,direction=LEFT,rpm_l=12.3,rpm_r=15.1,zone=A,age_ms=40,speed=120
+ *     STAT,mode=AUTO,direction=LEFT,rpm_l=12.3,rpm_r=15.1,zone=A구역,age_ms=40,speed=120
  *
  * Bluetooth (USART1)
  *   A/M : AUTO/MANUAL
@@ -25,6 +25,13 @@
 #include <stdbool.h>
 #include "pn532.h"
 
+#define RPI_RX_BUF_SIZE 32
+
+volatile char rpi_rx_buf[RPI_RX_BUF_SIZE];
+volatile uint8_t rpi_rx_idx = 0;
+volatile uint8_t rpi_line_ready = 0;
+
+
 #define DIR1 PB5
 #define DIR3 PA3
 
@@ -32,7 +39,9 @@
 #define LEFT_ENCODER_DIR   PE5
 #define RIGHT_ENCODER_PULSE PD4
 #define RIGHT_ENCODER_DIR   PD5
-#define PPR 95
+#define ENCODER_PPR_MOTOR 95.0
+#define GEAR_RATIO 100.0
+#define OUTPUT_PPR (ENCODER_PPR_MOTOR * GEAR_RATIO)
 #define COMMAND_TIMEOUT_MS 300
 
 volatile char rpi_command = 'S';
@@ -48,6 +57,33 @@ volatile uint32_t left_period_ticks = 0;
 volatile uint8_t left_new_pulse = 0;
 volatile uint16_t left_no_pulse_timer = 0;
 double left_rpm = 0;
+
+volatile uint8_t rpm_control_mode = 0;
+volatile double target_left_rpm = 0;
+volatile double target_right_rpm = 0;
+
+static double left_pid_i = 0;
+static double right_pid_i = 0;
+static double left_prev_error = 0;
+static double right_prev_error = 0;
+
+static int pid_left_pwm = 0;
+static int pid_right_pwm = 0;
+
+#define RPM_KP 1.0
+#define RPM_KI 0.05
+#define RPM_KD 0.0
+#define PID_DT 0.05
+
+#define RPM_BASE_PWM 45
+
+#define PID_I_MIN -100.0
+#define PID_I_MAX 100.0
+
+#define PID_PWM_MIN 0
+#define PID_PWM_MAX 255
+
+
 
 volatile long right_pulse_count = 0;
 volatile int right_direction = 1;
@@ -109,105 +145,201 @@ static void set_current_direction(const char* dir) {
     }
 }
 
+static void set_motor_speed(int left_pwm, int right_pwm, uint8_t left_dir, uint8_t right_dir);
+
+
 ISR(USART0_RX_vect) {
-    char received_char = UDR0;
+	char c = UDR0;
 
-    if (received_char == 'A') {
-        is_auto_mode = 1;
-        bt_command = 0;
-        rpi_command = 'S';
-        jetson_cmd_age_ms = 1000;
-        set_current_direction("STOP");
-        telemetry_dirty = 1;
-        return;
-    }
-    if (received_char == 'M') {
-        is_auto_mode = 0;
-        rpi_command = 'S';
-        bt_command = 0;
-        jetson_cmd_age_ms = 1000;
-        set_current_direction("STOP");
-        telemetry_dirty = 1;
-        return;
-    }
+	if (c == 'A') {
+		is_auto_mode = 1;
+		bt_command = 0;
+		rpi_command = 'S';
+		rpm_control_mode = 0;
+		target_left_rpm = 0;
+		target_right_rpm = 0;
+		pid_left_pwm = 0;
+		pid_right_pwm = 0;
+		left_pid_i = 0;
+		right_pid_i = 0;
+		left_prev_error = 0;
+		right_prev_error = 0;
+		jetson_cmd_age_ms = 1000;
+		set_current_direction("STOP");
+		telemetry_dirty = 1;
+		rpi_rx_idx = 0;
+		return;
+	}
 
-    if (received_char == 'F' || received_char == 'L' || received_char == 'R' || received_char == 'S') {
-        if (is_auto_mode) {
-            rpi_command = received_char;
-            jetson_cmd_age_ms = 0;
-            set_current_direction(cmd_to_direction(received_char));
-        } else {
-            if (received_char == 'F') {
-                bt_command = 'w';
-                set_current_direction("FORWARD");
-            } else if (received_char == 'L') {
-                bt_command = 'l';
-                set_current_direction("LEFT");
-            } else if (received_char == 'R') {
-                bt_command = 'r';
-                set_current_direction("RIGHT");
-            } else {
-                bt_command = 0;
-                manual_speed = 0;
-                set_current_direction("STOP");
-            }
-            telemetry_dirty = 1;
-        }
-    }
+	if (c == 'M') {
+		is_auto_mode = 0;
+		rpi_command = 'S';
+		bt_command = 0;
+		rpm_control_mode = 0;
+		target_left_rpm = 0;
+		target_right_rpm = 0;
+		pid_left_pwm = 0;
+		pid_right_pwm = 0;
+		left_pid_i = 0;
+		right_pid_i = 0;
+		left_prev_error = 0;
+		right_prev_error = 0;
+		jetson_cmd_age_ms = 1000;
+		set_current_direction("STOP");
+		telemetry_dirty = 1;
+		rpi_rx_idx = 0;
+		return;
+	}
 
-    if (!is_auto_mode) {
-        if (received_char >= '0' && received_char <= '9') {
-            if (received_char == '0') manual_speed = 255;
-            else manual_speed = (received_char - '0') * 25;
-            telemetry_dirty = 1;
-        } else if (received_char == '+') {
-            manual_speed += 10;
-            if (manual_speed > 255) manual_speed = 255;
-            telemetry_dirty = 1;
-        } else if (received_char == '-') {
-            manual_speed -= 10;
-            if (manual_speed < 0) manual_speed = 0;
-            telemetry_dirty = 1;
-        }
-    }
+	if (c == 'F' || c == 'L' || c == 'R' || c == 'S') {
+		if (!is_auto_mode) {
+			if (c == 'F') {
+				bt_command = 'w';
+				set_current_direction("FORWARD");
+				} else if (c == 'L') {
+				bt_command = 'l';
+				set_current_direction("LEFT");
+				} else if (c == 'R') {
+				bt_command = 'r';
+				set_current_direction("RIGHT");
+				} else { // 'S'
+				bt_command = 0;
+				set_motor_speed(0, 0, 1, 1);
+				set_current_direction("STOP");
+			}
+
+			telemetry_dirty = 1;
+		}
+		return;
+	}
+	
+	if (!is_auto_mode) {
+		if (c >= '0' && c <= '9') {
+			if (c == '0') manual_speed = 255;
+			else manual_speed = (c - '0') * 25;
+
+			telemetry_dirty = 1;
+			return;
+		}
+
+		if (c == '+') {
+			manual_speed += 10;
+			if (manual_speed > 255) manual_speed = 255;
+
+			telemetry_dirty = 1;
+			return;
+		}
+
+		if (c == '-') {
+			manual_speed -= 10;
+			if (manual_speed < 0) manual_speed = 0;
+
+			telemetry_dirty = 1;
+			return;
+		}
+	}
+
+
+	if (c == '\n' || c == '\r') {
+		if (rpi_rx_idx > 0) {
+			rpi_rx_buf[rpi_rx_idx] = '\0';
+			rpi_line_ready = 1;
+			rpi_rx_idx = 0;
+		}
+		return;
+	}
+
+	if (rpi_rx_idx < RPI_RX_BUF_SIZE - 1) {
+		rpi_rx_buf[rpi_rx_idx++] = c;
+		} else {
+		rpi_rx_idx = 0;
+	}
 }
+
 
 ISR(USART1_RX_vect) {
     char rx_char = UDR1;
     char msg_buf[64];
 
     if (rx_char == ' ') {
-        is_auto_mode = 0;
-        bt_command = 0;
-        manual_speed = 0;
-        rpi_command = 'S';
-        set_current_direction("STOP");
-        telemetry_dirty = 1;
-        uart1_print("!! EMERGENCY STOP !!\r\n");
-        return;
+	    is_auto_mode = 0;
+	    bt_command = 0;
+	    manual_speed = 0;
+	    rpi_command = 'S';
+
+	    rpm_control_mode = 0;
+	    target_left_rpm = 0;
+	    target_right_rpm = 0;
+	    pid_left_pwm = 0;
+	    pid_right_pwm = 0;
+	    left_pid_i = 0;
+	    right_pid_i = 0;
+	    left_prev_error = 0;
+	    right_prev_error = 0;
+
+
+	    set_motor_speed(0, 0, 1, 1);
+	    set_current_direction("STOP");
+	    telemetry_dirty = 1;
+	    uart1_print("!! EMERGENCY STOP !!\r\n");
+	    return;
     }
 
+
     if (rx_char == 'A' || rx_char == 'a') {
-        is_auto_mode = 1;
-        bt_command = 0;
-        telemetry_dirty = 1;
-        uart1_print("Mode: AUTO\r\n");
-        return;
+	    is_auto_mode = 1;
+	    bt_command = 0;
+	    rpi_command = 'S';
+
+	    rpm_control_mode = 0;
+	    target_left_rpm = 0;
+	    target_right_rpm = 0;
+	    pid_left_pwm = 0;
+	    pid_right_pwm = 0;
+	    left_pid_i = 0;
+	    right_pid_i = 0;
+	    left_prev_error = 0;
+	    right_prev_error = 0;
+	    jetson_cmd_age_ms = 1000;
+
+	    set_motor_speed(0, 0, 1, 1);
+	    set_current_direction("STOP");
+	    telemetry_dirty = 1;
+	    uart1_print("Mode: AUTO\r\n");
+	    return;
     }
+
+
     if (rx_char == 'M' || rx_char == 'm') {
-        is_auto_mode = 0;
-        rpi_command = 'S';
-        bt_command = 0;
-        telemetry_dirty = 1;
-        set_current_direction("STOP");
-        uart1_print("Mode: MANUAL\r\n");
-        return;
+	    is_auto_mode = 0;
+	    rpi_command = 'S';
+	    bt_command = 0;
+
+	    rpm_control_mode = 0;
+	    target_left_rpm = 0;
+	    target_right_rpm = 0;
+	    pid_left_pwm = 0;
+	    pid_right_pwm = 0;
+	    left_pid_i = 0;
+	    right_pid_i = 0;
+	    left_prev_error = 0;
+	    right_prev_error = 0;
+	    jetson_cmd_age_ms = 1000;
+
+	    set_motor_speed(0, 0, 1, 1);
+	    set_current_direction("STOP");
+	    telemetry_dirty = 1;
+	    uart1_print("Mode: MANUAL\r\n");
+	    return;
     }
+
+
 
     if (!is_auto_mode) {
         if (rx_char == 'x' || rx_char == 'X') {
             bt_command = 0;
             manual_speed = 0;
+			set_motor_speed(0, 0, 1, 1);
             set_current_direction("STOP");
             telemetry_dirty = 1;
             uart1_print("CMD: x (Manual Stop)\r\n");
@@ -314,34 +446,137 @@ static void set_motor_speed(int left_pwm, int right_pwm, uint8_t left_dir, uint8
     if (right_dir == 1) PORTA |= (1<<DIR3); else PORTA &= ~(1<<DIR3);
 }
 
-static void line_follow_logic(void) {
-    const int BASE_SPEED = 120;
-    const int TURN_SPEED = 60;
-    if (jetson_cmd_age_ms > COMMAND_TIMEOUT_MS) {
-        set_motor_speed(0, 0, 1, 1);
-        set_current_direction("STOP");
-        return;
-    }
-    switch (rpi_command) {
-        case 'F':
-            set_motor_speed(BASE_SPEED, BASE_SPEED, 1, 1);
-            set_current_direction("FORWARD");
-            break;
-        case 'L':
-            set_motor_speed(TURN_SPEED, BASE_SPEED, 1, 1);
-            set_current_direction("LEFT");
-            break;
-        case 'R':
-            set_motor_speed(BASE_SPEED, TURN_SPEED, 1, 1);
-            set_current_direction("RIGHT");
-            break;
-        case 'S':
-        default:
-            set_motor_speed(0, 0, 1, 1);
-            set_current_direction("STOP");
-            break;
-    }
+static void handle_rpi_line(void) {
+	char line[RPI_RX_BUF_SIZE];
+
+	cli();
+	if (!rpi_line_ready) {
+		sei();
+		return;
+	}
+	strcpy(line, (const char*)rpi_rx_buf);
+	rpi_line_ready = 0;
+	sei();
+
+	if (!is_auto_mode) return;
+
+	if (line[0] == 'T' && line[1] == ',') {
+		int l = 0;
+		int r = 0;
+
+		if (sscanf(line, "T,%d,%d", &l, &r) == 2) {
+			if (l < 0) l = 0;
+			if (l > 300) l = 300;
+			if (r < 0) r = 0;
+			if (r > 300) r = 300;
+
+			target_left_rpm = l;
+			target_right_rpm = r;
+			rpm_control_mode = 1;
+			jetson_cmd_age_ms = 0;
+			telemetry_dirty = 1;
+		}
+	}
 }
+
+
+static int clamp_int(int v, int min_v, int max_v) {
+	if (v < min_v) return min_v;
+	if (v > max_v) return max_v;
+	return v;
+}
+
+static void rpm_pid_update(void) {
+	double left_error = target_left_rpm - left_rpm;
+	double right_error = target_right_rpm - right_rpm;
+
+	if (target_left_rpm <= 0) {
+		pid_left_pwm = 0;
+		left_pid_i = 0;
+		left_prev_error = 0;
+		} else {
+		left_pid_i += left_error * PID_DT;
+
+		if (left_pid_i > PID_I_MAX) left_pid_i = PID_I_MAX;
+		if (left_pid_i < PID_I_MIN) left_pid_i = PID_I_MIN;
+
+		double left_d = (left_error - left_prev_error) / PID_DT;
+
+		double left_out =
+		RPM_BASE_PWM +
+		(RPM_KP * left_error) +
+		(RPM_KI * left_pid_i) +
+		(RPM_KD * left_d);
+
+		pid_left_pwm = clamp_int((int)left_out, PID_PWM_MIN, PID_PWM_MAX);
+		left_prev_error = left_error;
+	}
+
+	if (target_right_rpm <= 0) {
+		pid_right_pwm = 0;
+		right_pid_i = 0;
+		right_prev_error = 0;
+		} else {
+		right_pid_i += right_error * PID_DT;
+
+		if (right_pid_i > PID_I_MAX) right_pid_i = PID_I_MAX;
+		if (right_pid_i < PID_I_MIN) right_pid_i = PID_I_MIN;
+
+		double right_d = (right_error - right_prev_error) / PID_DT;
+
+		double right_out =
+		RPM_BASE_PWM +
+		(RPM_KP * right_error) +
+		(RPM_KI * right_pid_i) +
+		(RPM_KD * right_d);
+
+		pid_right_pwm = clamp_int((int)right_out, PID_PWM_MIN, PID_PWM_MAX);
+		right_prev_error = right_error;
+	}
+
+	set_motor_speed(pid_left_pwm, pid_right_pwm, 1, 1);
+}
+
+
+
+
+static void line_follow_logic(void) {
+	if (jetson_cmd_age_ms > COMMAND_TIMEOUT_MS) {
+		set_motor_speed(0, 0, 1, 1);
+		set_current_direction("STOP");
+
+		rpm_control_mode = 0;
+		target_left_rpm = 0;
+		target_right_rpm = 0;
+		pid_left_pwm = 0;
+		pid_right_pwm = 0;
+		left_pid_i = 0;
+		right_pid_i = 0;
+		left_prev_error = 0;
+		right_prev_error = 0;
+		return;
+	}
+
+	if (rpm_control_mode) {
+		rpm_pid_update();
+
+		if (target_left_rpm == 0 && target_right_rpm == 0) {
+			set_current_direction("STOP");
+			} else if (target_left_rpm > target_right_rpm + 5) {
+			set_current_direction("RIGHT");
+			} else if (target_right_rpm > target_left_rpm + 5) {
+			set_current_direction("LEFT");
+			} else {
+			set_current_direction("FORWARD");
+		}
+		return;
+	}
+
+	set_motor_speed(0, 0, 1, 1);
+	set_current_direction("STOP");
+}
+
+
 
 static void manual_control_logic(void) {
     switch (bt_command) {
@@ -562,6 +797,10 @@ int main(void) {
 
     while (1) {
         _delay_ms(10);
+		
+		handle_rpi_line();
+
+		
         left_no_pulse_timer += 10;
         right_no_pulse_timer += 10;
         print_timer += 10;
@@ -571,32 +810,34 @@ int main(void) {
         if (uid_hold_ms >= 10) uid_hold_ms -= 10; else uid_hold_ms = 0;
 
         if (left_new_pulse) {
-            left_new_pulse = 0;
-            uint32_t ticks;
-            cli(); ticks = left_period_ticks; sei();
-            if (ticks > 0) {
-                double raw = (16000000.0 / (double)ticks) / PPR * 60.0;
-                left_rpm = (raw + l_f1 + l_f2) / 3.0;
-                l_f2 = l_f1; l_f1 = raw;
-                telemetry_dirty = 1;
-            }
+	        left_new_pulse = 0;
+	        uint32_t ticks;
+	        cli(); ticks = left_period_ticks; sei();
+	        if (ticks > 0) {
+		        double raw = (16000000.0 / (double)ticks) / OUTPUT_PPR * 60.0;
+		        left_rpm = (raw + l_f1 + l_f2) / 3.0;
+		        l_f2 = l_f1; l_f1 = raw;
+		        telemetry_dirty = 1;
+	        }
         }
+
         if (left_no_pulse_timer > 200) {
             if (left_rpm != 0) telemetry_dirty = 1;
             left_rpm = 0; l_f1 = 0; l_f2 = 0;
         }
 
         if (right_new_pulse) {
-            right_new_pulse = 0;
-            uint32_t ticks;
-            cli(); ticks = right_period_ticks; sei();
-            if (ticks > 0) {
-                double raw_r = (16000000.0 / (double)ticks) / PPR * 60.0;
-                right_rpm = (raw_r + r_f1 + r_f2) / 3.0;
-                r_f2 = r_f1; r_f1 = raw_r;
-                telemetry_dirty = 1;
-            }
+	        right_new_pulse = 0;
+	        uint32_t ticks;
+	        cli(); ticks = right_period_ticks; sei();
+	        if (ticks > 0) {
+		        double raw_r = (16000000.0 / (double)ticks) / OUTPUT_PPR * 60.0;
+		        right_rpm = (raw_r + r_f1 + r_f2) / 3.0;
+		        r_f2 = r_f1; r_f1 = raw_r;
+		        telemetry_dirty = 1;
+	        }
         }
+
         if (right_no_pulse_timer > 200) {
             if (right_rpm != 0) telemetry_dirty = 1;
             right_rpm = 0; r_f1 = 0; r_f2 = 0;
@@ -622,3 +863,7 @@ int main(void) {
         }
     }
 }
+
+
+
+
