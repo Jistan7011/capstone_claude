@@ -137,8 +137,25 @@ class MCUBridge:
             diag.last_serial_error = 'pyserial not installed'
             diag.serial_connected = False
             return
+        with self._port_lock:
+            if self.ser is not None and self.ser.is_open:
+                self.start_reader()
+                return
+            try:
+                s = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=SERIAL_TIMEOUT)
+                self.ser = s
+            except Exception as e:
+                self.ser = None
+                diag.serial_connected = False
+                diag.last_serial_error = str(e)
+                self.start_reader()  # 실패해도 reader 스레드는 시작 (재시도 루프)
+                return
+        time.sleep(2.0)
+        diag.serial_connected = True
+        diag.last_serial_error = ''
         self.start_reader()
-        # 초기 포트 열기는 reader_loop 내 _try_open_port()가 담당
+        if AUTO_ON_START:
+            self.send_raw('A')
 
     def start_reader(self):
         if self.reader_thread and self.reader_thread.is_alive():
@@ -163,34 +180,17 @@ class MCUBridge:
             self.ser = None
         diag.serial_connected = False
 
-    def _try_open_port(self):
-        """포트 열기만 시도한다. reader 스레드를 새로 만들지 않는다."""
-        if not SERIAL_ENABLED or serial is None:
-            return
-        with self._port_lock:
-            if self.ser is not None and self.ser.is_open:
-                return
-            try:
-                s = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=SERIAL_TIMEOUT)
-                self.ser = s
-            except Exception as e:
-                self.ser = None
-                diag.serial_connected = False
-                diag.last_serial_error = str(e)
-                return
-        diag.serial_connected = True
-        diag.last_serial_error = ''
-        serial_log.appendleft({'ts': time.time(), 'dir': 'RX', 'text': '[시리얼 연결됨]'})
-        if AUTO_ON_START:
-            self.send_raw('A')
-
     def send_raw(self, text: str):
         if not SERIAL_ENABLED:
             return False
         with self._port_lock:
             ser = self.ser
         if ser is None or not ser.is_open:
-            return False
+            self.connect()  # 0502처럼 즉시 재연결 시도
+            with self._port_lock:
+                ser = self.ser
+            if ser is None or not ser.is_open:
+                return False
         try:
             ser.write(text.encode('ascii', errors='ignore'))
             ser.flush()
@@ -227,7 +227,7 @@ class MCUBridge:
             if ser is None or not ser.is_open:
                 # 포트가 없으면 일정 간격으로 재연결 시도 (reader 스레드 살아있음)
                 time.sleep(SERIAL_RECONNECT_DELAY)
-                self._try_open_port()
+                self.connect()
                 buf.clear()
                 continue
             try:
@@ -470,7 +470,7 @@ def append_history(cmd, sent, err, source, mode):
         })
 
 
-def build_manual_frame(frame):
+def build_paused_frame(frame, tele_mode):
     result = {
         'detected': False,
         'cx': None,
@@ -478,11 +478,11 @@ def build_manual_frame(frame):
         'err': None,
         'threshold': None,
         'decision': 'S',
-        'vision_state': 'PAUSED_MANUAL',
+        'vision_state': f'PAUSED_{tele_mode}',
     }
     annotated = frame.copy()
     if DRAW_DEBUG_TEXT:
-        annotated = draw_status(annotated, result, 'PAUSED', 'MANUAL')
+        annotated = draw_status(annotated, result, 'PAUSED', tele_mode)
     return annotated, result
 
 
@@ -541,9 +541,9 @@ def camera_worker():
 
         try:
             tele_mode = get_current_mode()
-            if tele_mode == 'MANUAL':
+            if tele_mode != 'AUTO':
                 lost_count = 0
-                annotated, result = build_manual_frame(frame)
+                annotated, result = build_paused_frame(frame, tele_mode)
             else:
                 annotated, result = process_line(frame)
                 if result['detected']:

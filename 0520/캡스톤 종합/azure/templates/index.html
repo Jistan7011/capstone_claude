@@ -495,10 +495,18 @@
     function postCmd(cmd) {
       if (!lineConnected) return;
       socket.emit('command', { cmd });
+      // 텔레메트리 응답 전 즉시 시각 피드백
+      if (cmd === 'A') { setActiveButton(modeButtons, 'A'); value('modePill', 'AUTO'); value('lineTracerPill', 'ACTIVE'); }
+      else if (cmd === 'M') { setActiveButton(modeButtons, 'M'); value('modePill', 'MANUAL'); value('lineTracerPill', 'PAUSED'); }
+      else if (cmd === 'S') { setActiveButton(dirButtons, 'S'); value('dirPill', 'STOP'); }
+      else if (cmd === 'F') { setActiveButton(dirButtons, 'F'); value('dirPill', 'FORWARD'); }
+      else if (cmd === 'L') { setActiveButton(dirButtons, 'L'); value('dirPill', 'LEFT'); }
+      else if (cmd === 'R') { setActiveButton(dirButtons, 'R'); value('dirPill', 'RIGHT'); }
     }
     function postSpeed(level) {
       if (!lineConnected) return;
       socket.emit('speed', { level });
+      value('speedVal', level * 25 === 0 ? 255 : level * 25);
     }
     function appendChat(role, text) {
       const msg = document.createElement('div');
