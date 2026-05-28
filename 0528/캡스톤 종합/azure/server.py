@@ -31,6 +31,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "dev-change-in-production")
 YOLO_SUMMARY_INTERVAL_SECONDS = int(os.getenv("YOLO_SUMMARY_INTERVAL_SECONDS", "900"))
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
+SERVER_START_TS = time.time()
 RAG_BOT_DIRS = [
     BASE_DIR / "rag_bot",
     PROJECT_DIR / "rag_bot",
@@ -91,6 +92,47 @@ def service_snapshot():
                 "latest_detections": list(yolo_latest_detections),
             },
         }
+
+
+def health_payload():
+    snap = service_snapshot()
+    counts15m = get_counts_last_15min()
+    recent = get_recent_detections(10)
+    summaries = get_recent_summaries(5)
+    zone_diseases = get_zone_disease_today()
+    line = snap["line"]
+    yolo = snap["yolo"]
+    return {
+        "ok": True,
+        "server": {
+            "time_utc": utc_now(),
+            "uptime_seconds": round(time.time() - SERVER_START_TS, 1),
+            "port": PORT,
+            "summary_interval_seconds": YOLO_SUMMARY_INTERVAL_SECONDS,
+        },
+        "line": {
+            "connected": line["connected"],
+            "has_frame": line["has_frame"],
+            "telemetry": line["telemetry"],
+            "mode": line["telemetry"].get("mode"),
+            "direction": line["telemetry"].get("direction"),
+            "zone": line["telemetry"].get("zone"),
+        },
+        "yolo": {
+            "connected": yolo["connected"],
+            "has_frame": yolo["has_frame"],
+            "last_update_ts": yolo["last_update_ts"],
+            "latest_meta": yolo["latest_meta"],
+            "latest_detection_count": len(yolo["latest_detections"]),
+            "counts15m": counts15m,
+        },
+        "db": {
+            "recent_detection_count": len(recent),
+            "recent_detections": recent,
+            "recent_summaries": summaries,
+            "zone_diseases_today": zone_diseases,
+        },
+    }
 
 
 def emit_yolo_tables():
@@ -404,9 +446,12 @@ def index():
 
 @app.route("/health")
 def health():
-    data = service_snapshot()
-    data["yolo"]["counts15m"] = get_counts_last_15min()
-    return jsonify(data)
+    return jsonify(health_payload())
+
+
+@app.route("/api/health")
+def api_health():
+    return jsonify(health_payload())
 
 
 @app.route("/api/yolo/detections", methods=["GET", "POST"])

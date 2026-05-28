@@ -43,6 +43,7 @@ volatile uint8_t rpi_line_ready = 0;
 #define GEAR_RATIO 100.0
 #define OUTPUT_PPR (ENCODER_PPR_MOTOR * GEAR_RATIO)
 #define COMMAND_TIMEOUT_MS 300
+#define MANUAL_MIN_PWM 90
 
 volatile char rpi_command = 'S';
 volatile uint8_t is_auto_mode = 0;
@@ -75,7 +76,7 @@ static int pid_right_pwm = 0;
 #define RPM_KD 0.0
 #define PID_DT 0.05
 
-#define RPM_BASE_PWM 45
+#define RPM_BASE_PWM 75
 
 #define PID_I_MIN -100.0
 #define PID_I_MAX 100.0
@@ -192,7 +193,29 @@ ISR(USART0_RX_vect) {
 	}
 
 	if (c == 'F' || c == 'L' || c == 'R' || c == 'S') {
-		if (!is_auto_mode) {
+		if (is_auto_mode) {
+			if (c == 'S') {
+				rpi_command = 'S';
+				rpm_control_mode = 0;
+				target_left_rpm = 0;
+				target_right_rpm = 0;
+				pid_left_pwm = 0;
+				pid_right_pwm = 0;
+				left_pid_i = 0;
+				right_pid_i = 0;
+				left_prev_error = 0;
+				right_prev_error = 0;
+				jetson_cmd_age_ms = 0;
+				set_motor_speed(0, 0, 1, 1);
+				set_current_direction("STOP");
+			} else {
+				rpi_command = c;
+				rpm_control_mode = 0;
+				jetson_cmd_age_ms = 0;
+				set_current_direction(cmd_to_direction(c));
+			}
+			telemetry_dirty = 1;
+		} else {
 			if (c == 'F') {
 				bt_command = 'w';
 				set_current_direction("FORWARD");
@@ -572,28 +595,48 @@ static void line_follow_logic(void) {
 		return;
 	}
 
-	set_motor_speed(0, 0, 1, 1);
-	set_current_direction("STOP");
+	switch (rpi_command) {
+		case 'F':
+			set_motor_speed(120, 120, 1, 1);
+			set_current_direction("FORWARD");
+			break;
+		case 'L':
+			set_motor_speed(75, 120, 1, 1);
+			set_current_direction("LEFT");
+			break;
+		case 'R':
+			set_motor_speed(120, 75, 1, 1);
+			set_current_direction("RIGHT");
+			break;
+		case 'S':
+		default:
+			set_motor_speed(0, 0, 1, 1);
+			set_current_direction("STOP");
+			break;
+	}
 }
 
 
 
 static void manual_control_logic(void) {
+	int drive_pwm = manual_speed;
+	if (drive_pwm > 0 && drive_pwm < MANUAL_MIN_PWM) drive_pwm = MANUAL_MIN_PWM;
+
     switch (bt_command) {
         case 'w': case 'W':
-            set_motor_speed(manual_speed, manual_speed, 1, 1);
+            set_motor_speed(drive_pwm, drive_pwm, 1, 1);
             set_current_direction("FORWARD");
             break;
         case 's': case 'S':
-            set_motor_speed(manual_speed, manual_speed, 0, 0);
+            set_motor_speed(drive_pwm, drive_pwm, 0, 0);
             set_current_direction("REVERSE");
             break;
         case 'l': case 'L':
-            set_motor_speed(manual_speed/2, manual_speed, 1, 1);
+            set_motor_speed(drive_pwm/2, drive_pwm, 1, 1);
             set_current_direction("LEFT");
             break;
         case 'r': case 'R':
-            set_motor_speed(manual_speed, manual_speed/2, 1, 1);
+            set_motor_speed(drive_pwm, drive_pwm/2, 1, 1);
             set_current_direction("RIGHT");
             break;
         default:

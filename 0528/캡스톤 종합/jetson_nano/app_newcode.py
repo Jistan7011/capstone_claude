@@ -56,8 +56,10 @@ SERIAL_ENABLED = os.getenv('SERIAL_ENABLED', '1') == '1'
 SERIAL_PORT = os.getenv('SERIAL_PORT', '/dev/ttyUSB0')
 SERIAL_BAUD = int(os.getenv('SERIAL_BAUD', '115200'))
 SERIAL_TIMEOUT = float(os.getenv('SERIAL_TIMEOUT', '0.05'))
+SERIAL_RECONNECT_DELAY = float(os.getenv('SERIAL_RECONNECT_DELAY', '3.0'))
 AUTO_ON_START = os.getenv('AUTO_ON_START', '1') == '1'
 COMMAND_SEND_INTERVAL_MS = int(os.getenv('COMMAND_SEND_INTERVAL_MS', '80'))
+MANUAL_OVERRIDE_SECONDS = float(os.getenv('MANUAL_OVERRIDE_SECONDS', '0.8'))
 
 latest_jpg = None
 jpg_lock = threading.Lock()
@@ -90,6 +92,7 @@ latest_telemetry = {
 command_history = deque(maxlen=40)
 serial_log = deque(maxlen=60)
 latest_command = 'S'
+manual_override_until = 0.0
 
 
 @dataclass
@@ -127,17 +130,32 @@ def get_current_mode() -> str:
     return str(get_telemetry_snapshot().get('mode', 'UNKNOWN')).upper()
 
 
+def set_manual_override(seconds=MANUAL_OVERRIDE_SECONDS):
+    global manual_override_until
+    manual_override_until = max(manual_override_until, time.time() + seconds)
+
+
+def clear_manual_override():
+    global manual_override_until
+    manual_override_until = 0.0
+
+
+def is_manual_override_active():
+    return time.time() < manual_override_until
+
+
 def update_local_telemetry_for_command(cmd: str):
     with telemetry_lock:
         if cmd == 'A':
             latest_telemetry['mode'] = 'AUTO'
             latest_telemetry['direction'] = 'STOP'
+            clear_manual_override()
         elif cmd == 'M':
             latest_telemetry['mode'] = 'MANUAL'
             latest_telemetry['direction'] = 'STOP'
         elif cmd in {'F', 'L', 'R', 'S'}:
             latest_telemetry['direction'] = cmd_to_label(cmd)
-            if latest_telemetry.get('mode') == 'UNKNOWN':
+            if cmd in {'F', 'L', 'R'}:
                 latest_telemetry['mode'] = 'MANUAL'
         elif cmd in {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9'}:
             latest_telemetry['manual_speed'] = 255 if cmd == '0' else int(cmd) * 25
@@ -255,6 +273,10 @@ class MCUBridge:
         return ok
 
     def send_web_command(self, cmd: str):
+        if cmd == 'A':
+            clear_manual_override()
+        elif cmd in {'M', 'F', 'L', 'R'}:
+            set_manual_override()
         if cmd in {'F', 'L', 'R'} and get_current_mode() != 'MANUAL':
             if not self.send_raw('M'):
                 return False
@@ -604,7 +626,7 @@ def camera_worker():
         try:
             tele_mode = get_current_mode()
 
-            if tele_mode != 'AUTO':
+            if tele_mode != 'AUTO' or is_manual_override_active():
                 lost_count = 0
                 annotated, result = build_manual_frame(frame)
             else:
@@ -619,14 +641,22 @@ def camera_worker():
                     if lost_count >= LOST_LINE_STOP_FRAMES:
                         left_rpm, right_rpm = 0, 0
                         decision = 'S'
-                        sent = mcu.send_target_rpm(left_rpm, right_rpm)
+                        sent = (
+                            mcu.send_target_rpm(left_rpm, right_rpm)
+                            if get_current_mode() == 'AUTO' and not is_manual_override_active()
+                            else False
+                        )
                     else:
                         decision = latest_command
                         sent = False
                 else:
                     left_rpm, right_rpm = compute_target_rpm(result['err'])
                     decision = f"T,{left_rpm},{right_rpm}"
-                    sent = mcu.send_target_rpm(left_rpm, right_rpm)
+                    sent = (
+                        mcu.send_target_rpm(left_rpm, right_rpm)
+                        if get_current_mode() == 'AUTO' and not is_manual_override_active()
+                        else False
+                    )
 
                 result['decision'] = decision
                 result['vision_state'] = 'ACTIVE'
