@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Line Tracer + YOLO Dashboard</title>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #f6f8fb;
+      color: #172033;
+      font-family: Arial, "Noto Sans KR", sans-serif;
+    }
+    button {
+      border: 1px solid #cdd6e3;
+      border-radius: 8px;
+      padding: 11px 12px;
+      cursor: pointer;
+      font-size: 14px;
+      background: #fff;
+      color: #172033;
+      font-weight: 700;
+    }
+    button:hover { background: #eef4ff; }
+    button.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+    button:disabled { opacity: .35; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 8px; border-bottom: 1px solid #e0e7f0; text-align: left; }
+    th { color: #64748b; font-weight: 700; }
+    .wrap { max-width: 1580px; margin: 0 auto; padding: 18px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+    .title { margin: 0; font-size: 26px; letter-spacing: 0; }
+    .sub { margin-top: 5px; color: #64748b; font-size: 14px; }
+    .status-pills { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 31px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: #fff;
+      border: 1px solid #d9e1ec;
+      color: #334155;
+      font-size: 13px;
+      white-space: nowrap;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, .06);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
+    .ok .dot { background: #22c55e; }
+    .bad .dot { background: #ef4444; }
+    .main-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(310px, 360px);
+      gap: 14px;
+      align-items: start;
+    }
+    .video-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .panel {
+      background: #fff;
+      border: 1px solid #d9e1ec;
+      border-radius: 8px;
+      padding: 14px;
+      min-width: 0;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, .06);
+    }
+    .panel h2 {
+      margin: 0 0 10px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+    .video-box {
+      aspect-ratio: 4 / 3;
+      background: #f1f5f9;
+      border: 1px solid #cdd6e3;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      color: #64748b;
+      font-size: 14px;
+    }
+    .video-box img { width: 100%; height: 100%; object-fit: contain; display: none; }
+    .controls { display: grid; gap: 10px; margin-top: 12px; }
+    .control-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .control-row.four { grid-template-columns: repeat(4, 1fr); }
+    .label { color: #64748b; font-size: 12px; margin-bottom: 6px; }
+    .stack { display: grid; gap: 14px; }
+    .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .metric {
+      min-height: 54px;
+      background: #f8fafc;
+      border: 1px solid #e0e7f0;
+      border-radius: 8px;
+      padding: 9px;
+    }
+    .metric .k { color: #64748b; font-size: 11px; }
+    .metric .v { margin-top: 5px; font-size: 16px; font-weight: 800; overflow-wrap: anywhere; }
+    .atmega-panel { padding: 12px; }
+    .atmega-panel .metric { min-height: 48px; padding: 8px; }
+    .atmega-panel .metric .v { font-size: 15px; }
+    .tables {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 14px;
+      margin-top: 14px;
+    }
+    .table-wrap { max-height: 310px; overflow: auto; border: 1px solid #e0e7f0; border-radius: 8px; }
+    .empty { color: #64748b; padding: 14px; font-size: 13px; }
+    .accent { color: #2563eb; }
+    .chat-panel {
+      min-height: 390px;
+      display: grid;
+      grid-template-rows: auto minmax(250px, 1fr) auto;
+    }
+    .chat-log {
+      overflow: auto;
+      border: 1px solid #e0e7f0;
+      border-radius: 8px;
+      background: #f8fafc;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .chat-msg {
+      max-width: 88%;
+      padding: 9px 11px;
+      border-radius: 8px;
+      line-height: 1.45;
+      font-size: 13px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .chat-msg.user {
+      align-self: flex-end;
+      background: #2563eb;
+      color: #fff;
+    }
+    .chat-msg.bot {
+      align-self: flex-start;
+      background: #fff;
+      color: #172033;
+      border: 1px solid #d9e1ec;
+    }
+    .chat-msg.auto {
+      align-self: flex-start;
+      background: #ecfdf5;
+      color: #064e3b;
+      border: 1px solid #bbf7d0;
+    }
+    .chat-form {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 74px;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .chat-form input {
+      width: 100%;
+      border: 1px solid #cdd6e3;
+      border-radius: 8px;
+      padding: 11px 12px;
+      font-size: 14px;
+      color: #172033;
+      background: #fff;
+    }
+    @media (max-width: 1080px) {
+      .main-grid, .video-grid, .tables { grid-template-columns: 1fr; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .status-pills { justify-content: flex-start; }
+    }
+    .zone-panel { margin-top: 14px; }
+    .zone-row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid #e0e7f0;
+      font-size: 13px;
+    }
+    .zone-row:last-child { border-bottom: none; }
+    .zone-label {
+      font-weight: 700;
+      color: #2563eb;
+      min-width: 70px;
+      white-space: nowrap;
+    }
+    .zone-diseases-list { display: flex; flex-wrap: wrap; gap: 6px; }
+    .disease-tag {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      color: #991b1b;
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div>
+        <h1 class="title">Line Tracer + YOLO Dashboard</h1>
+        <div class="sub">라인트레이서 주행 제어, 실시간 영상, YOLO 스트림, 감지 로그를 한 화면에서 확인합니다.</div>
+      </div>
+      <div class="status-pills">
+        <span class="pill bad" id="lineConn"><span class="dot"></span>Line Jetson: <strong>OFF</strong></span>
+        <span class="pill bad" id="yoloConn"><span class="dot"></span>YOLO Stream: <strong>OFF</strong></span>
+        <span class="pill" id="lastYolo">YOLO last: <strong>-</strong></span>
+      </div>
+    </div>
+
+    <div class="main-grid">
+      <div class="stack">
+        <div class="video-grid">
+          <section class="panel">
+            <h2>Line Tracer View</h2>
+            <div class="video-box">
+              <span id="linePlaceholder">라인트레이서 Jetson 연결 대기</span>
+              <img id="lineStream" alt="line tracer stream" />
+            </div>
+            <div class="controls">
+              <div>
+                <div class="label">Mode</div>
+                <div class="control-row">
+                  <button id="btnModeA" onclick="postCmd('A')">AUTO</button>
+                  <button id="btnModeM" onclick="postCmd('M')">MANUAL</button>
+                  <button id="btnDirS" onclick="postCmd('S')">STOP</button>
+                </div>
+              </div>
+              <div>
+                <div class="label">Direction</div>
+                <div class="control-row">
+                  <button id="btnDirL" onclick="postCmd('L')">LEFT</button>
+                  <button id="btnDirF" onclick="postCmd('F')">FORWARD</button>
+                  <button id="btnDirR" onclick="postCmd('R')">RIGHT</button>
+                </div>
+              </div>
+              <div>
+                <div class="label">Manual Speed: <span id="speedVal">-</span></div>
+                <div class="control-row four">
+                  <button onclick="postSpeed(3)">75</button>
+                  <button onclick="postSpeed(5)">125</button>
+                  <button onclick="postSpeed(7)">175</button>
+                  <button onclick="postSpeed(0)">255</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2>YOLO View</h2>
+            <div class="video-box">
+              <span id="yoloPlaceholder">YOLO 스트림 연결 대기</span>
+              <img id="yoloStream" alt="yolo stream" />
+            </div>
+            <div class="metric-grid" style="margin-top:12px;">
+              <div class="metric"><div class="k">Device</div><div class="v" id="yoloDevice">-</div></div>
+              <div class="metric"><div class="k">Frame</div><div class="v" id="yoloFrame">-</div></div>
+              <div class="metric"><div class="k">FPS</div><div class="v" id="yoloFps">-</div></div>
+              <div class="metric"><div class="k">Detections</div><div class="v" id="yoloCount">0</div></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="tables">
+          <section class="panel">
+            <h2>Recent YOLO Detections</h2>
+            <div class="table-wrap" id="recentTable"></div>
+          </section>
+          <section class="panel">
+            <h2>15 Minute Summaries</h2>
+            <div class="table-wrap" id="summaryTable"></div>
+          </section>
+        </div>
+        <section class="panel zone-panel">
+          <h2>오늘의 구역별 병해 현황</h2>
+          <div id="zoneDiseaseList"><div class="empty">감지된 구역 병해 데이터가 없습니다.</div></div>
+        </section>
+      </div>
+
+      <aside class="stack">
+        <section class="panel atmega-panel">
+          <h2>ATmega Status</h2>
+          <div class="metric-grid">
+            <div class="metric"><div class="k">Mode</div><div class="v" id="modePill">-</div></div>
+            <div class="metric"><div class="k">Direction</div><div class="v" id="dirPill">-</div></div>
+            <div class="metric"><div class="k">RPM Left</div><div class="v" id="rpmLeft">-</div></div>
+            <div class="metric"><div class="k">RPM Right</div><div class="v" id="rpmRight">-</div></div>
+            <div class="metric"><div class="k">Location</div><div class="v accent" id="locationName">-</div></div>
+            <div class="metric"><div class="k">Line Tracer</div><div class="v" id="lineTracerPill">-</div></div>
+          </div>
+        </section>
+
+        <section class="panel chat-panel">
+          <h2>RAG Chatbot</h2>
+          <div id="ragChatLog" class="chat-log">
+            <div class="chat-msg bot">딸기 병해 관련 질문을 입력하세요.</div>
+          </div>
+          <form id="ragChatForm" class="chat-form">
+            <input id="ragQuestion" type="text" placeholder="질문 입력" autocomplete="off" />
+            <button id="ragSend" type="submit">Send</button>
+          </form>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const socket = io();
+    let lineConnected = false;
+
+    const lineConn = document.getElementById('lineConn');
+    const yoloConn = document.getElementById('yoloConn');
+    const lastYolo = document.getElementById('lastYolo');
+    const lineStream = document.getElementById('lineStream');
+    const yoloStream = document.getElementById('yoloStream');
+    const linePlaceholder = document.getElementById('linePlaceholder');
+    const yoloPlaceholder = document.getElementById('yoloPlaceholder');
+    const ragChatLog = document.getElementById('ragChatLog');
+    const ragChatForm = document.getElementById('ragChatForm');
+    const ragQuestion = document.getElementById('ragQuestion');
+    const ragSend = document.getElementById('ragSend');
+    const ragHistory = [];
+    const modeButtons = { A: byId('btnModeA'), M: byId('btnModeM') };
+    const dirButtons = { L: byId('btnDirL'), F: byId('btnDirF'), R: byId('btnDirR'), S: byId('btnDirS') };
+
+    function byId(id) { return document.getElementById(id); }
+    function value(id, text) { byId(id).textContent = text ?? '-'; }
+    function setConn(el, label, connected) {
+      el.className = connected ? 'pill ok' : 'pill bad';
+      el.innerHTML = `<span class="dot"></span>${label}: <strong>${connected ? 'ON' : 'OFF'}</strong>`;
+    }
+    function setActiveButton(group, activeKey) {
+      Object.entries(group).forEach(([key, el]) => {
+        if (!el) return;
+        el.classList.toggle('active', key === activeKey);
+      });
+    }
+    function directionToKey(d) {
+      return { LEFT:'L', FORWARD:'F', RIGHT:'R', STOP:'S' }[String(d || '').toUpperCase()] || null;
+    }
+    function modeToKey(m) {
+      return { AUTO:'A', MANUAL:'M' }[String(m || '').toUpperCase()] || null;
+    }
+    function fmtNum(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toFixed(2) : '-';
+    }
+
+    socket.on('connect', () => {});
+    socket.on('disconnect', () => {
+      setLineConnected(false);
+      setYoloConnected(false);
+    });
+    socket.on('service_status', (data) => {
+      if (data.line) {
+        setLineConnected(data.line.connected);
+        if (data.line.telemetry) updateTelemetry(data.line.telemetry);
+      }
+      if (data.yolo) {
+        setYoloConnected(data.yolo.connected);
+        updateYoloMeta(data.yolo.latest_meta || {});
+        if (data.yolo.last_update_ts) lastYolo.innerHTML = `YOLO last: <strong>${data.yolo.last_update_ts}</strong>`;
+      }
+    });
+    socket.on('jetson_status', (data) => setLineConnected(Boolean(data.connected)));
+    socket.on('yolo_status', (data) => {
+      setYoloConnected(Boolean(data.connected));
+      updateYoloMeta(data.meta || {});
+    });
+    socket.on('telemetry_update', updateTelemetry);
+    socket.on('frame_update', (data) => setImage(lineStream, linePlaceholder, data.data));
+    socket.on('yolo_frame_update', (data) => {
+      setImage(yoloStream, yoloPlaceholder, data.data);
+      updateYoloMeta(data);
+    });
+    socket.on('yolo_detection_update', (data) => {
+      updateYoloMeta(data.latest_meta || {});
+      value('yoloCount', (data.latest_detections || []).length);
+      if (data.last_update_ts) lastYolo.innerHTML = `YOLO last: <strong>${data.last_update_ts}</strong>`;
+    });
+    socket.on('yolo_stats_update', renderStats);
+    socket.on('rag_auto_message', (data) => {
+      const answer = data.answer || '15분 자동 분석 결과가 없습니다.';
+      appendChat('auto', `[15분 자동 분석]\n${answer}`);
+      ragHistory.push({ role: 'assistant', content: answer });
+    });
+
+    function setImage(img, placeholder, b64) {
+      if (!b64) return;
+      img.src = 'data:image/jpeg;base64,' + b64;
+      img.style.display = 'block';
+      placeholder.style.display = 'none';
+    }
+    function setLineConnected(connected) {
+      lineConnected = connected;
+      setConn(lineConn, 'Line Jetson', connected);
+      document.querySelectorAll('button').forEach((b) => b.disabled = !connected);
+      if (!connected) {
+        lineStream.style.display = 'none';
+        linePlaceholder.style.display = '';
+      }
+    }
+    function setYoloConnected(connected) {
+      setConn(yoloConn, 'YOLO Stream', connected);
+      if (!connected) {
+        yoloStream.style.display = 'none';
+        yoloPlaceholder.style.display = '';
+      }
+    }
+    function updateTelemetry(t) {
+      value('modePill', t.mode);
+      value('dirPill', t.direction);
+      value('rpmLeft', t.rpm_left);
+      value('rpmRight', t.rpm_right);
+      value('locationName', t.zone);
+      value('speedVal', t.manual_speed);
+      const lineActive = String(t.mode || '').toUpperCase() === 'AUTO';
+      value('lineTracerPill', lineActive ? 'ACTIVE' : 'PAUSED');
+      setActiveButton(modeButtons, modeToKey(t.mode));
+      setActiveButton(dirButtons, directionToKey(t.direction));
+    }
+    function updateYoloMeta(meta) {
+      value('yoloDevice', meta.device_id);
+      value('yoloFrame', meta.frame_id);
+      value('yoloFps', meta.fps);
+      if (meta.detection_count != null) value('yoloCount', meta.detection_count);
+    }
+    function renderZoneDiseases(rows) {
+      const container = byId('zoneDiseaseList');
+      if (!rows || !rows.length) {
+        container.innerHTML = '<div class="empty">오늘 감지된 구역 병해 데이터가 없습니다.</div>';
+        return;
+      }
+      const zoneMap = {};
+      rows.forEach(r => {
+        const z = r.zone || '-';
+        if (!zoneMap[z]) zoneMap[z] = [];
+        zoneMap[z].push({ name: r.class_name, count: r.detection_count });
+      });
+      container.innerHTML = Object.keys(zoneMap).sort().map(zone =>
+        `<div class="zone-row">
+          <span class="zone-label">${zone}</span>
+          <div class="zone-diseases-list">${zoneMap[zone].map(d => `<span class="disease-tag">${d.name}</span>`).join('')}</div>
+        </div>`
+      ).join('');
+    }
+    function renderStats(data) {
+      renderRecent(data.recent || []);
+      renderSummary(data.summaries || []);
+      renderZoneDiseases(data.zone_diseases || []);
+    }
+    function renderRecent(rows) {
+      if (!rows.length) {
+        byId('recentTable').innerHTML = '<div class="empty">감지 로그가 아직 없습니다.</div>';
+        return;
+      }
+      byId('recentTable').innerHTML = `
+        <table><thead><tr><th>Time</th><th>Zone</th><th>Class</th><th>Conf</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${r.timestamp || '-'}</td><td>${r.zone || '-'}</td><td>${r.class_name || '-'}</td><td>${fmtNum(r.confidence)}</td></tr>`).join('')}</tbody></table>`;
+    }
+    function renderSummary(rows) {
+      if (!rows.length) {
+        byId('summaryTable').innerHTML = '<div class="empty">15분 요약 데이터가 아직 없습니다.</div>';
+        return;
+      }
+      byId('summaryTable').innerHTML = `
+        <table><thead><tr><th>Created</th><th>Class</th><th>Count</th><th>Avg</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${r.created_at || '-'}</td><td>${r.class_name || '-'}</td><td>${r.detection_count ?? 0}</td><td>${fmtNum(r.avg_confidence)}</td></tr>`).join('')}</tbody></table>`;
+    }
+    function renderCounts(rows) {
+      if (!rows.length) {
+        byId('counts15m').innerHTML = '<div class="empty">최근 15분 감지 없음</div>';
+        return;
+      }
+      byId('counts15m').innerHTML = `
+        <table><thead><tr><th>Class</th><th>Count</th><th>Avg Conf</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td>${r.class_name || '-'}</td><td>${r.detection_count ?? 0}</td><td>${fmtNum(r.avg_confidence)}</td></tr>`).join('')}</tbody></table>`;
+    }
+    function postCmd(cmd) {
+      if (!lineConnected) return;
+      socket.emit('command', { cmd });
+      // 텔레메트리 응답 전 즉시 시각 피드백
+      if (cmd === 'A') { setActiveButton(modeButtons, 'A'); value('modePill', 'AUTO'); value('lineTracerPill', 'ACTIVE'); }
+      else if (cmd === 'M') { setActiveButton(modeButtons, 'M'); value('modePill', 'MANUAL'); value('lineTracerPill', 'PAUSED'); }
+      else if (cmd === 'S') { setActiveButton(dirButtons, 'S'); value('dirPill', 'STOP'); }
+      else if (cmd === 'F') { setActiveButton(dirButtons, 'F'); value('dirPill', 'FORWARD'); }
+      else if (cmd === 'L') { setActiveButton(dirButtons, 'L'); value('dirPill', 'LEFT'); }
+      else if (cmd === 'R') { setActiveButton(dirButtons, 'R'); value('dirPill', 'RIGHT'); }
+    }
+    function postSpeed(level) {
+      if (!lineConnected) return;
+      socket.emit('speed', { level });
+      value('speedVal', level * 25 === 0 ? 255 : level * 25);
+    }
+    function appendChat(role, text) {
+      const msg = document.createElement('div');
+      msg.className = `chat-msg ${role}`;
+      msg.textContent = text;
+      ragChatLog.appendChild(msg);
+      ragChatLog.scrollTop = ragChatLog.scrollHeight;
+      return msg;
+    }
+    ragChatForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const question = ragQuestion.value.trim();
+      if (!question) return;
+
+      appendChat('user', question);
+      ragHistory.push({ role: 'user', content: question });
+      ragQuestion.value = '';
+      ragSend.disabled = true;
+      const pending = appendChat('bot', '답변 생성 중...');
+
+      try {
+        const res = await fetch('/api/rag/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question,
+            history: ragHistory,
+            is_first: ragHistory.filter((m) => m.role === 'user').length === 1,
+          }),
+        });
+        const data = await res.json();
+        const answer = data.ok ? data.answer : `오류: ${data.error || 'RAG 챗봇 응답 실패'}`;
+        pending.textContent = answer;
+        ragHistory.push({ role: 'assistant', content: answer });
+      } catch (err) {
+        pending.textContent = `오류: ${err.message}`;
+      } finally {
+        ragSend.disabled = false;
+        ragQuestion.focus();
+      }
+    });
+  </script>
+</body>
+</html>
