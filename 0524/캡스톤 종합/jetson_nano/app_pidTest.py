@@ -40,6 +40,14 @@ MIN_WIDTH = int(os.getenv('MIN_WIDTH', '10'))
 MIN_HEIGHT = int(os.getenv('MIN_HEIGHT', '10'))
 CENTER_DEADBAND = int(os.getenv('CENTER_DEADBAND', '40'))
 LOST_LINE_STOP_FRAMES = int(os.getenv('LOST_LINE_STOP_FRAMES', '3'))
+
+BASE_RPM = int(os.getenv('BASE_RPM', '50'))
+MIN_RPM = int(os.getenv('MIN_RPM', '15'))
+MAX_RPM = int(os.getenv('MAX_RPM', '100'))
+STEER_RPM_KP = float(os.getenv('STEER_RPM_KP', '0.20'))
+MAX_STEER_RPM = int(os.getenv('MAX_STEER_RPM', '30'))
+
+
 DRAW_DEBUG_TEXT = os.getenv('DRAW_DEBUG_TEXT', '1') == '1'
 DRAW_CONTOURS = os.getenv('DRAW_CONTOURS', '1') == '1'
 SHOW_MASK_PREVIEW = os.getenv('SHOW_MASK_PREVIEW', '0') == '1'
@@ -48,7 +56,6 @@ SERIAL_ENABLED = os.getenv('SERIAL_ENABLED', '1') == '1'
 SERIAL_PORT = os.getenv('SERIAL_PORT', '/dev/ttyUSB0')
 SERIAL_BAUD = int(os.getenv('SERIAL_BAUD', '115200'))
 SERIAL_TIMEOUT = float(os.getenv('SERIAL_TIMEOUT', '0.05'))
-SERIAL_RECONNECT_DELAY = float(os.getenv('SERIAL_RECONNECT_DELAY', '3.0'))
 AUTO_ON_START = os.getenv('AUTO_ON_START', '1') == '1'
 COMMAND_SEND_INTERVAL_MS = int(os.getenv('COMMAND_SEND_INTERVAL_MS', '80'))
 
@@ -120,25 +127,9 @@ def get_current_mode() -> str:
     return str(get_telemetry_snapshot().get('mode', 'UNKNOWN')).upper()
 
 
-def update_local_telemetry_for_command(cmd: str):
-    with telemetry_lock:
-        if cmd == 'A':
-            latest_telemetry['mode'] = 'AUTO'
-            latest_telemetry['direction'] = 'STOP'
-        elif cmd == 'M':
-            latest_telemetry['mode'] = 'MANUAL'
-            latest_telemetry['direction'] = 'STOP'
-        elif cmd in {'F', 'L', 'R', 'S'}:
-            latest_telemetry['direction'] = cmd_to_label(cmd)
-        elif cmd in {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9'}:
-            latest_telemetry['manual_speed'] = 255 if cmd == '0' else int(cmd) * 25
-        latest_telemetry['last_update_ts'] = time.time()
-
-
 class MCUBridge:
     def __init__(self):
         self.ser = None
-        self._port_lock = threading.Lock()
         self.last_sent_cmd = None
         self.last_sent_ts = 0.0
         self.reader_thread = None
@@ -152,25 +143,20 @@ class MCUBridge:
             diag.last_serial_error = 'pyserial not installed'
             diag.serial_connected = False
             return
-        with self._port_lock:
-            if self.ser is not None and self.ser.is_open:
-                self.start_reader()
-                return
-            try:
-                s = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=SERIAL_TIMEOUT)
-                self.ser = s
-            except Exception as e:
-                self.ser = None
-                diag.serial_connected = False
-                diag.last_serial_error = str(e)
-                self.start_reader()  # 실패해도 reader 스레드는 시작 (재시도 루프)
-                return
-        time.sleep(2.0)
-        diag.serial_connected = True
-        diag.last_serial_error = ''
-        self.start_reader()
-        if AUTO_ON_START:
-            self.send_raw('A')
+        if self.ser is not None and self.ser.is_open:
+            return
+        try:
+            self.ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=SERIAL_TIMEOUT)
+            time.sleep(2.0)
+            diag.serial_connected = True
+            diag.last_serial_error = ''
+            self.start_reader()
+            if AUTO_ON_START:
+                self.send_raw('A')
+        except Exception as e:
+            self.ser = None
+            diag.serial_connected = False
+            diag.last_serial_error = str(e)
 
     def start_reader(self):
         if self.reader_thread and self.reader_thread.is_alive():
@@ -180,35 +166,26 @@ class MCUBridge:
         self.reader_thread.start()
 
     def close(self):
-        """reader 스레드를 완전히 종료할 때만 사용한다."""
         self.reader_stop.set()
-        self._drop_port()
-
-    def _drop_port(self):
-        """reader_stop을 건드리지 않고 포트만 닫는다. 재연결 루프가 살아있게 유지."""
-        with self._port_lock:
-            try:
-                if self.ser:
-                    self.ser.close()
-            except Exception:
-                pass
-            self.ser = None
+        try:
+            if self.ser:
+                self.ser.close()
+        except Exception:
+            pass
+        self.ser = None
         diag.serial_connected = False
 
     def send_raw(self, text: str):
         if not SERIAL_ENABLED:
             return False
-        with self._port_lock:
-            ser = self.ser
-        if ser is None or not ser.is_open:
-            self.connect()  # 0502처럼 즉시 재연결 시도
-            with self._port_lock:
-                ser = self.ser
-            if ser is None or not ser.is_open:
+        if self.ser is None or not self.ser.is_open:
+            self.connect()
+            if self.ser is None or not self.ser.is_open:
                 return False
         try:
-            ser.write(text.encode('ascii', errors='ignore'))
-            ser.flush()
+            payload = text.encode('ascii', errors='ignore')
+            self.ser.write(payload)
+            self.ser.flush()
             diag.serial_connected = True
             diag.last_serial_write_ts = time.time()
             diag.last_serial_command = text
@@ -219,7 +196,7 @@ class MCUBridge:
             diag.serial_connected = False
             diag.last_serial_error = str(e)
             serial_log.appendleft({'ts': time.time(), 'dir': 'TX', 'text': f'ERROR: {e}'})
-            self._drop_port()  # reader 스레드는 유지한 채 포트만 닫음
+            self.close()
             return False
 
     def send_command(self, cmd: str):
@@ -233,37 +210,29 @@ class MCUBridge:
             self.last_sent_ts = now
         return ok
 
-    def send_web_command(self, cmd: str):
-        """Send a browser command.
-
-        Direction buttons are intended as manual driving controls. In AUTO mode
-        the ATmega stops after COMMAND_TIMEOUT_MS unless commands keep arriving,
-        so force MANUAL before a one-shot web direction command.
-        """
-        if cmd in {'F', 'L', 'R'} and get_current_mode() != 'MANUAL':
-            if not self.send_raw('M'):
-                return False
-            update_local_telemetry_for_command('M')
-            time.sleep(0.02)
+    def send_target_rpm(self, left_rpm: int, right_rpm: int):
+        cmd = f"T,{left_rpm},{right_rpm}\n"
+        now = time.time()
+        min_interval = COMMAND_SEND_INTERVAL_MS / 1000.0
+        if self.last_sent_cmd == cmd and (now - self.last_sent_ts) < min_interval:
+            return False
+            
         ok = self.send_raw(cmd)
         if ok:
-            update_local_telemetry_for_command(cmd)
+            self.last_sent_cmd = cmd
+            self.last_sent_ts = now
         return ok
+
 
     def reader_loop(self):
         diag.serial_reader_started = True
         buf = bytearray()
         while not self.reader_stop.is_set():
-            with self._port_lock:
-                ser = self.ser
-            if ser is None or not ser.is_open:
-                # 포트가 없으면 일정 간격으로 재연결 시도 (reader 스레드 살아있음)
-                time.sleep(SERIAL_RECONNECT_DELAY)
-                self.connect()
-                buf.clear()
+            if self.ser is None or not self.ser.is_open:
+                time.sleep(0.1)
                 continue
             try:
-                b = ser.read(1)
+                b = self.ser.read(1)
                 if not b:
                     continue
                 if b == b'\n':
@@ -276,8 +245,9 @@ class MCUBridge:
             except Exception as e:
                 diag.last_serial_error = str(e)
                 serial_log.appendleft({'ts': time.time(), 'dir': 'RX', 'text': f'ERROR: {e}'})
-                self._drop_port()  # reader_stop 건드리지 않음 → 루프 유지
-                buf.clear()
+                self.close()
+                time.sleep(1.0)
+                self.connect()
 
     def handle_line(self, line: str):
         diag.last_serial_line_ts = time.time()
@@ -406,6 +376,21 @@ def decide_command(result, lost_count):
         return 'R'
     return 'F'
 
+def compute_target_rpm(err):
+    if abs(err) <= CENTER_DEADBAND:
+        steer = 0
+    else:
+        steer = int(np.clip(STEER_RPM_KP * err, -MAX_STEER_RPM, MAX_STEER_RPM))
+
+    left_rpm = BASE_RPM + steer
+    right_rpm = BASE_RPM - steer
+
+    left_rpm = int(np.clip(left_rpm, MIN_RPM, MAX_RPM))
+    right_rpm = int(np.clip(right_rpm, MIN_RPM, MAX_RPM))
+
+    return left_rpm, right_rpm
+
+
 
 def process_line(frame_bgr):
     H, W = frame_bgr.shape[:2]
@@ -502,7 +487,7 @@ def append_history(cmd, sent, err, source, mode):
         })
 
 
-def build_paused_frame(frame, tele_mode):
+def build_manual_frame(frame):
     result = {
         'detected': False,
         'cx': None,
@@ -510,11 +495,11 @@ def build_paused_frame(frame, tele_mode):
         'err': None,
         'threshold': None,
         'decision': 'S',
-        'vision_state': f'PAUSED_{tele_mode}',
+        'vision_state': 'PAUSED_MANUAL',
     }
     annotated = frame.copy()
     if DRAW_DEBUG_TEXT:
-        annotated = draw_status(annotated, result, 'PAUSED', tele_mode)
+        annotated = draw_status(annotated, result, 'PAUSED', 'MANUAL')
     return annotated, result
 
 
@@ -573,22 +558,38 @@ def camera_worker():
 
         try:
             tele_mode = get_current_mode()
+
             if tele_mode != 'AUTO':
                 lost_count = 0
-                annotated, result = build_paused_frame(frame, tele_mode)
+                annotated, result = build_manual_frame(frame)
             else:
                 annotated, result = process_line(frame)
+
                 if result['detected']:
                     lost_count = 0
                 else:
                     lost_count += 1
-                decision = decide_command(result, lost_count)
+
+                if not result['detected'] or result['err'] is None:
+                    if lost_count >= LOST_LINE_STOP_FRAMES:
+                        left_rpm, right_rpm = 0, 0
+                        decision = 'S'
+                        sent = mcu.send_target_rpm(left_rpm, right_rpm)
+                    else:
+                        decision = latest_command
+                        sent = False
+                else:
+                    left_rpm, right_rpm = compute_target_rpm(result['err'])
+                    decision = f"T,{left_rpm},{right_rpm}"
+                    sent = mcu.send_target_rpm(left_rpm, right_rpm)
+
                 result['decision'] = decision
                 result['vision_state'] = 'ACTIVE'
-                sent = mcu.send_command(decision)
                 append_history(decision, sent, result['err'], 'vision', tele_mode)
+
                 if DRAW_DEBUG_TEXT:
-                    annotated = draw_status(annotated, result, cmd_to_label(decision), tele_mode)
+                    annotated = draw_status(annotated, result, decision, tele_mode)
+
         except Exception as e:
             diag.last_error = f'frame process error: {e}'
             continue
@@ -599,8 +600,10 @@ def camera_worker():
 
         diag.last_process_ms = round((t1 - t0) * 1000.0, 2)
         diag.last_encode_ms = round((t2 - t1) * 1000.0, 2)
+
         with result_lock:
             latest_result = result
+
         if jpg is not None:
             with jpg_lock:
                 latest_jpg = jpg
@@ -684,15 +687,9 @@ def send_manual(cmd):
     cmd = cmd.upper()
     if cmd not in {'F', 'L', 'R', 'S', 'A', 'M'}:
         return jsonify({'ok': False, 'error': 'invalid command'}), 400
-    ok = mcu.send_web_command(cmd)
+    ok = mcu.send_raw(cmd)
     append_history(cmd, ok, None, 'web', get_current_mode())
-    status = 200 if ok else 503
-    return jsonify({
-        'ok': ok,
-        'cmd': cmd,
-        'serial_connected': diag.serial_connected,
-        'serial_error': diag.last_serial_error,
-    }), status
+    return jsonify({'ok': ok, 'cmd': cmd, 'serial_error': diag.last_serial_error})
 
 
 @app.route('/speed/<int:level>', methods=['POST'])
@@ -701,40 +698,22 @@ def set_speed(level):
         return jsonify({'ok': False, 'error': 'level must be 0-9'}), 400
     cmd = str(level)
     ok = mcu.send_raw(cmd)
-    if ok:
-        update_local_telemetry_for_command(cmd)
     append_history(cmd, ok, None, 'web', get_current_mode())
-    status = 200 if ok else 503
-    return jsonify({
-        'ok': ok,
-        'level': level,
-        'serial_connected': diag.serial_connected,
-        'serial_error': diag.last_serial_error,
-    }), status
+    return jsonify({'ok': ok, 'level': level, 'serial_error': diag.last_serial_error})
 
 
 @app.route('/speed/up', methods=['POST'])
 def speed_up():
     ok = mcu.send_raw('+')
     append_history('+', ok, None, 'web', get_current_mode())
-    status = 200 if ok else 503
-    return jsonify({
-        'ok': ok,
-        'serial_connected': diag.serial_connected,
-        'serial_error': diag.last_serial_error,
-    }), status
+    return jsonify({'ok': ok, 'serial_error': diag.last_serial_error})
 
 
 @app.route('/speed/down', methods=['POST'])
 def speed_down():
     ok = mcu.send_raw('-')
     append_history('-', ok, None, 'web', get_current_mode())
-    status = 200 if ok else 503
-    return jsonify({
-        'ok': ok,
-        'serial_connected': diag.serial_connected,
-        'serial_error': diag.last_serial_error,
-    }), status
+    return jsonify({'ok': ok, 'serial_error': diag.last_serial_error})
 
 
 if __name__ == '__main__':

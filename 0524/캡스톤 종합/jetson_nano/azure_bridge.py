@@ -67,7 +67,15 @@ def on_command(data: dict):
         return
     try:
         r = requests.post(f'{LOCAL_URL}/send/{cmd}', timeout=2)
-        print(f'[Bridge] 명령 전달: {cmd} → {r.status_code}')
+        try:
+            body = r.json()
+        except ValueError:
+            body = {'ok': r.ok, 'error': r.text[:120]}
+        if r.ok and body.get('ok'):
+            print(f'[Bridge] 명령 전달 성공: {cmd} → {r.status_code}')
+        else:
+            err = body.get('serial_error') or body.get('error') or 'unknown error'
+            print(f'[Bridge] 명령 전달 실패: {cmd} → {r.status_code}, {err}')
     except requests.RequestException as e:
         print(f'[Bridge] 명령 전달 실패 ({cmd}): {e}')
 
@@ -78,13 +86,29 @@ def on_speed(data: dict):
     try:
         if 'level' in data:
             level = int(data['level'])
-            requests.post(f'{LOCAL_URL}/speed/{level}', timeout=2)
-            print(f'[Bridge] 속도 설정: level={level}')
+            r = requests.post(f'{LOCAL_URL}/speed/{level}', timeout=2)
+            try:
+                body = r.json()
+            except ValueError:
+                body = {'ok': r.ok, 'error': r.text[:120]}
+            if r.ok and body.get('ok'):
+                print(f'[Bridge] 속도 설정 성공: level={level}')
+            else:
+                err = body.get('serial_error') or body.get('error') or 'unknown error'
+                print(f'[Bridge] 속도 설정 실패: level={level} → {r.status_code}, {err}')
         elif 'dir' in data:
             direction = str(data['dir'])
             if direction in ('up', 'down'):
-                requests.post(f'{LOCAL_URL}/speed/{direction}', timeout=2)
-                print(f'[Bridge] 속도 증감: dir={direction}')
+                r = requests.post(f'{LOCAL_URL}/speed/{direction}', timeout=2)
+                try:
+                    body = r.json()
+                except ValueError:
+                    body = {'ok': r.ok, 'error': r.text[:120]}
+                if r.ok and body.get('ok'):
+                    print(f'[Bridge] 속도 증감 성공: dir={direction}')
+                else:
+                    err = body.get('serial_error') or body.get('error') or 'unknown error'
+                    print(f'[Bridge] 속도 증감 실패: dir={direction} → {r.status_code}, {err}')
     except (requests.RequestException, ValueError) as e:
         print(f'[Bridge] 속도 명령 전달 실패: {e}')
 
